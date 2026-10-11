@@ -1,0 +1,6 @@
+# training runs (checkpoints, tensorboard, videos) - selected models live in checkpoints/
+logs/
+outputs/
+__pycache__/
+*.pyc
+*.log

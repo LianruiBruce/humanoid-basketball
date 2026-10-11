@@ -1,0 +1,199 @@
+#usda 1.0
+(
+    defaultPrim = "Hoop"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+# Basketball hoop. Origin = rim center. Robot shoots along +X, so the backboard sits behind the rim at +X.
+# Rim: 16 capsules on a circle of radius 0.12 m (ball radius 0.035 m).
+def Xform "Hoop" (
+    prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+)
+{
+    bool physics:kinematicEnabled = 1
+    float physics:mass = 2.0
+
+    def Cube "Backboard" (
+        prepend apiSchemas = ["PhysicsCollisionAPI"]
+    )
+    {
+        double size = 1
+        color3f[] primvars:displayColor = [(0.95, 0.95, 0.95)]
+        double3 xformOp:translate = (0.18, 0, 0.14)
+        float3 xformOp:scale = (0.02, 0.6, 0.42)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def Cube "Bracket" (
+        prepend apiSchemas = ["PhysicsCollisionAPI"]
+    )
+    {
+        double size = 1
+        color3f[] primvars:displayColor = [(0.9, 0.35, 0.05)]
+        double3 xformOp:translate = (0.145, 0, -0.01)
+        float3 xformOp:scale = (0.05, 0.04, 0.015)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def Capsule "Rim_00" ( prepend apiSchemas = ["PhysicsCollisionAPI"] )
+    {
+        uniform token axis = "Y"
+        double height = 0.04
+        double radius = 0.008
+        color3f[] primvars:displayColor = [(0.9, 0.35, 0.05)]
+        double3 xformOp:translate = (0.12, 0, 0)
+        float xformOp:rotateZ = 0
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+    }
+    def Capsule "Rim_01" ( prepend apiSchemas = ["PhysicsCollisionAPI"] )
+    {
+        uniform token axis = "Y"
+        double height = 0.04
+        double radius = 0.008
+        color3f[] primvars:displayColor = [(0.9, 0.35, 0.05)]
+        double3 xformOp:translate = (0.110866, 0.045922, 0)
+        float xformOp:rotateZ = 22.5
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+    }
+    def Capsule "Rim_02" ( prepend apiSchemas = ["PhysicsCollisionAPI"] )
+    {
+        uniform token axis = "Y"
+        double height = 0.04
+        double radius = 0.008
+        color3f[] primvars:displayColor = [(0.9, 0.35, 0.05)]
+        double3 xformOp:translate = (0.084853, 0.084853, 0)
+        float xformOp:rotateZ = 45
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+    }
+    def Capsule "Rim_03" ( prepend apiSchemas = ["PhysicsCollisionAPI"] )
+    {
+        uniform token axis = "Y"
+        double height = 0.04
+        double radius = 0.008
+        color3f[] primvars:displayColor = [(0.9, 0.35, 0.05)]
+        double3 xformOp:translate = (0.045922, 0.110866, 0)
+        float xformOp:rotateZ = 67.5
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+    }
+    def Capsule "Rim_04" ( prepend apiSchemas = ["PhysicsCollisionAPI"] )
+    {
+        uniform token axis = "Y"
+        double height = 0.04
+        double radius = 0.008
+        color3f[] primvars:displayColor = [(0.9, 0.35, 0.05)]
+        double3 xformOp:translate = (0, 0.12, 0)
+        float xformOp:rotateZ = 90
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+    }
+    def Capsule "Rim_05" ( prepend apiSchemas = ["PhysicsCollisionAPI"] )
+    {
+        uniform token axis = "Y"
+        double height = 0.04
+        double radius = 0.008
+        color3f[] primvars:displayColor = [(0.9, 0.35, 0.05)]
+        double3 xformOp:translate = (-0.045922, 0.110866, 0)
+        float xformOp:rotateZ = 112.5
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+    }
+    def Capsule "Rim_06" ( prepend apiSchemas = ["PhysicsCollisionAPI"] )
+    {
+        uniform token axis = "Y"
+        double height = 0.04
+        double radius = 0.008
+        color3f[] primvars:displayColor = [(0.9, 0.35, 0.05)]
+        double3 xformOp:translate = (-0.084853, 0.084853, 0)
+        float xformOp:rotateZ = 135
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+    }
+    def Capsule "Rim_07" ( prepend apiSchemas = ["PhysicsCollisionAPI"] )
+    {
+        uniform token axis = "Y"
+        double height = 0.04
+        double radius = 0.008
+        color3f[] primvars:displayColor = [(0.9, 0.35, 0.05)]
+        double3 xformOp:translate = (-0.110866, 0.045922, 0)
+        float xformOp:rotateZ = 157.5
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+    }
+    def Capsule "Rim_08" ( prepend apiSchemas = ["PhysicsCollisionAPI"] )
+    {
+        uniform token axis = "Y"
+        double height = 0.04
+        double radius = 0.008
+        color3f[] primvars:displayColor = [(0.9, 0.35, 0.05)]
+        double3 xformOp:translate = (-0.12, 0, 0)
+        float xformOp:rotateZ = 180
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+    }
+    def Capsule "Rim_09" ( prepend apiSchemas = ["PhysicsCollisionAPI"] )
+    {
+        uniform token axis = "Y"
+        double height = 0.04
+        double radius = 0.008
+        color3f[] primvars:displayColor = [(0.9, 0.35, 0.05)]
+        double3 xformOp:translate = (-0.110866, -0.045922, 0)
+        float xformOp:rotateZ = 202.5
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+    }
+    def Capsule "Rim_10" ( prepend apiSchemas = ["PhysicsCollisionAPI"] )
+    {
+        uniform token axis = "Y"
+        double height = 0.04
+        double radius = 0.008
+        color3f[] primvars:displayColor = [(0.9, 0.35, 0.05)]
+        double3 xformOp:translate = (-0.084853, -0.084853, 0)
+        float xformOp:rotateZ = 225
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+    }
+    def Capsule "Rim_11" ( prepend apiSchemas = ["PhysicsCollisionAPI"] )
+    {
+        uniform token axis = "Y"
+        double height = 0.04
+        double radius = 0.008
+        color3f[] primvars:displayColor = [(0.9, 0.35, 0.05)]
+        double3 xformOp:translate = (-0.045922, -0.110866, 0)
+        float xformOp:rotateZ = 247.5
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+    }
+    def Capsule "Rim_12" ( prepend apiSchemas = ["PhysicsCollisionAPI"] )
+    {
+        uniform token axis = "Y"
+        double height = 0.04
+        double radius = 0.008
+        color3f[] primvars:displayColor = [(0.9, 0.35, 0.05)]
+        double3 xformOp:translate = (0, -0.12, 0)
+        float xformOp:rotateZ = 270
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+    }
+    def Capsule "Rim_13" ( prepend apiSchemas = ["PhysicsCollisionAPI"] )
+    {
+        uniform token axis = "Y"
+        double height = 0.04
+        double radius = 0.008
+        color3f[] primvars:displayColor = [(0.9, 0.35, 0.05)]
+        double3 xformOp:translate = (0.045922, -0.110866, 0)
+        float xformOp:rotateZ = 292.5
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+    }
+    def Capsule "Rim_14" ( prepend apiSchemas = ["PhysicsCollisionAPI"] )
+    {
+        uniform token axis = "Y"
+        double height = 0.04
+        double radius = 0.008
+        color3f[] primvars:displayColor = [(0.9, 0.35, 0.05)]
+        double3 xformOp:translate = (0.084853, -0.084853, 0)
+        float xformOp:rotateZ = 315
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+    }
+    def Capsule "Rim_15" ( prepend apiSchemas = ["PhysicsCollisionAPI"] )
+    {
+        uniform token axis = "Y"
+        double height = 0.04
+        double radius = 0.008
+        color3f[] primvars:displayColor = [(0.9, 0.35, 0.05)]
+        double3 xformOp:translate = (0.110866, -0.045922, 0)
+        float xformOp:rotateZ = 337.5
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+    }
+}
