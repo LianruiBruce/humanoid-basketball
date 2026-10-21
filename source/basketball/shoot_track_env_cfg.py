@@ -202,10 +202,16 @@ def _use_push(cfg, motion: str, push: str):
     # the push) so the envs are not all in the same phase: with synchronized starts the first PPO updates broke the
     # policy (100% falls within 6 iterations)
     cfg.commands.motion.min_frames_before_release = cfg.commands.motion.release_frame - 10
-    # the full-speed push leaves little balance margin: with observation noise every episode fell at the push start
-    cfg.observations.policy.enable_corruption = False
+    # the full-speed push leaves little balance margin: with full observation noise every episode fell at the push
+    # start, without any the shot was fragile (make rate swung between 0% and 40% with the number of simulated envs,
+    # i.e. with GPU solver round-off), so the noise is kept at 30% of the tracking scale
+    for term in vars(cfg.observations.policy).values():
+        noise = getattr(term, "noise", None)
+        if noise is not None and hasattr(noise, "n_min"):
+            noise.n_min, noise.n_max = 0.3 * noise.n_min, 0.3 * noise.n_max
     cfg.observations.policy.actions = ObsTerm(func=mdp.last_action_with_push)
     cfg.observations.critic.actions = ObsTerm(func=mdp.last_action_with_push)
+    cfg.rewards.fallen_after_release = RewTerm(func=mdp.fallen_after_release, weight=-10.0)
     # the push's leg drive lifts the feet off the reference (a small hop); falls are still caught by the torso
     # height / tilt checks
     cfg.terminations.end_effectors = None

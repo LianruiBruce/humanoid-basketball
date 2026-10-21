@@ -11,6 +11,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--task", default="Basketball-G1-ShootTrack-Play-v0")
 parser.add_argument("--checkpoint", default=None)
 parser.add_argument("--steps", type=int, default=25)
+parser.add_argument("--num_envs", type=int, default=None)
 parser.add_argument("--zero_action", action="store_true", help="hold the default pose instead of the policy")
 parser.add_argument("--ghost_ball", action="store_true", help="ball without collisions (isolates the policy)")
 parser.add_argument("--flat_hands", action="store_true", help="fingers straight instead of curled around the ball")
@@ -33,6 +34,8 @@ from isaaclab_tasks.utils import load_cfg_from_registry  # noqa: E402
 
 cfg = load_cfg_from_registry(args.task, "env_cfg_entry_point")
 agent = load_cfg_from_registry(args.task, "rsl_rl_cfg_entry_point")
+if args.num_envs:
+    cfg.scene.num_envs = args.num_envs
 if args.ghost_ball:
     cfg.scene.ball.spawn.collision_props.collision_enabled = False
 if args.flat_hands:

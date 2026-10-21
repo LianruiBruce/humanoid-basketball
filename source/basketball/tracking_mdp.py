@@ -454,7 +454,13 @@ def grasp_assist(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None, max_force
     force = force * torch.clamp(max_force / norm, max=1.0) * holding.float().unsqueeze(1)
     ids = [robot.body_names.index(n) for n in PALMS]
     reaction = (-0.5 * force).unsqueeze(1).expand(-1, 2, -1).contiguous()
-    robot.set_external_force_and_torque(reaction, torch.zeros_like(reaction), body_ids=ids, is_global=True)
+    # the wrench composer converts global forces with link orientations it caches until its next reset, and it is
+    # only reset when some env resets: with one env (or envs in lockstep) the palms got the force rotated by their
+    # orientation at the start of the episode (1 env: 0% makes, 64 desynchronized envs: 70%). Reset it every step.
+    composer = robot.permanent_wrench_composer
+    composer.reset()
+    composer.set_forces_and_torques(forces=reaction, torques=torch.zeros_like(reaction),
+                                    body_ids=torch.tensor(ids, device=env.device), is_global=True)
     # last write before letting go: start of the reference flight
     last = c.time_steps == c.release_frame + 1
     c.release_pos[last] = palm_center(env)[last]
@@ -659,6 +665,16 @@ def until_release(env: ManagerBasedRLEnv, func, params: dict, grace: int = 15, c
     decided at the release, so the episode runs on until the ball resolves even if the robot loses balance."""
     c = _cmd(env, command_name)
     return func(env, **params) & (c.time_steps <= c.release_frame + grace)
+
+
+def fallen_after_release(env: ManagerBasedRLEnv, height_threshold: float = 0.35, tilt_threshold: float = 0.8,
+                         grace: int = 15, command_name: str = "motion") -> torch.Tensor:
+    """1 per step while the robot is down after the release window (the fall terminations stop there so the shot can
+    resolve; without this the jump-shot policy learned to collapse right after letting go)."""
+    c = _cmd(env, command_name)
+    down = anchor_height_error(env, height_threshold, command_name) | anchor_tilt_error(env, tilt_threshold,
+                                                                                         command_name)
+    return (down & (c.time_steps > c.release_frame + grace)).float()
 
 
 def motion_finished(env: ManagerBasedRLEnv, command_name: str = "motion") -> torch.Tensor:

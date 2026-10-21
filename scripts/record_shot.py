@@ -25,6 +25,8 @@ parser.add_argument("--eval", action="store_true", help="no video: tally episode
 parser.add_argument("--num_envs", type=int, default=512)
 parser.add_argument("--start_frame", type=int, default=None, help="every episode starts at this reference frame")
 parser.add_argument("--video_envs", type=int, default=1, help="envs simulated while recording env 0")
+parser.add_argument("--stagger", action="store_true",
+                    help="random initial episode lengths, as in training (init_at_random_ep_len)")
 parser.add_argument("--nominal", action="store_true", help="no startup randomization (friction, torso COM)")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
@@ -82,7 +84,11 @@ aims = []  # per-episode ballistic aim score at the release, exp(-miss / std) in
 
 torch.inference_mode().__enter__()
 obs, _ = env.reset()
-env0_made = []  # steps at which env 0 (the recorded one) scored
+if args.stagger:
+    base.episode_length_buf = torch.randint_like(base.episode_length_buf, high=int(base.max_episode_length))
+env0_made = []
+made_per_env = torch.zeros(base.num_envs, dtype=torch.long, device=base.device)
+eps_per_env = torch.zeros(base.num_envs, dtype=torch.long, device=base.device)  # steps at which env 0 (the recorded one) scored
 for step in range(args.steps):
     rm = base.reward_manager
     aim_before = rm._episode_sums["ballistic_aim"].clone() if "ballistic_aim" in rm.active_terms else None
@@ -97,6 +103,9 @@ for step in range(args.steps):
     if track_before is not None and dones.any():
         tracks += (track_before[dones.bool()] / (rm.get_term_cfg("ball_track").weight * base.step_dt)).tolist()
     episodes += int(dones.sum())
+    if "made" in tm.active_terms:
+        made_per_env += (tm.get_term("made") & dones.bool()).long()
+        eps_per_env += dones.long()
     if "made" in tm.active_terms and bool(tm.get_term("made")[0]) and bool(dones[0]):
         env0_made.append(step)
     for n in outcomes:
@@ -111,6 +120,22 @@ if aims:
     a = np.array(aims)
     print(f"[record] aim score per episode: mean {a.mean():.3f}, quartiles {np.percentile(a, [25, 50, 75]).round(3)}, "
           f">0.8: {(a > 0.8).mean():.2f}")
+if args.eval and base.num_envs > 1:
+    rate = (made_per_env.float() / eps_per_env.clamp(min=1)).cpu()
+    o = base.scene.env_origins.cpu()
+    print(f"[record] per-env make rate: {[round(x, 2) for x in rate.tolist()]}")
+    print(f"[record] env origins x: {[round(x, 1) for x in o[:, 0].tolist()]}")
+    robot = base.scene["robot"]
+    torso = robot.body_names.index("torso_link")
+    com = robot.root_physx_view.get_coms()[:, torso, :3].cpu()
+    fric = robot.root_physx_view.get_material_properties()[:, :, 0].mean(dim=1).cpu()
+    import numpy as np
+    r = rate.numpy()
+    for name, v in (("com x", com[:, 0]), ("com y", com[:, 1]), ("com z", com[:, 2]), ("friction", fric)):
+        v = v.numpy()
+        print(f"[record] corr(make rate, {name}) = {np.corrcoef(r, v)[0, 1]:+.2f}")
+    print(f"[record] env 0: com {com[0].tolist()}, friction {fric[0]:.2f}, make rate {r[0]:.2f}")
+    print(f"[record] env origins y: {[round(x, 1) for x in o[:, 1].tolist()]}")
 if starts:
     st, a = np.array(starts), np.array(aims)
     for f in np.unique(st):
