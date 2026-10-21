@@ -143,6 +143,26 @@ gym.register(
 )
 
 gym.register(
+    id="Basketball-G1-Track-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.tracking_env_cfg:G1TrackingEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.agents:G1TrackingPPORunnerCfg",
+    },
+    disable_env_checker=True,
+)
+
+gym.register(
+    id="Basketball-G1-Track-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.tracking_env_cfg:G1TrackingEnvCfg_PLAY",
+        "rsl_rl_cfg_entry_point": f"{__name__}.agents:G1TrackingPPORunnerCfg",
+    },
+    disable_env_checker=True,
+)
+
+gym.register(
     id="Basketball-Shoot-Franka-Play-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     kwargs={
