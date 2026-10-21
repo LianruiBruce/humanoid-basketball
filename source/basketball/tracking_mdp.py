@@ -194,9 +194,14 @@ class BallMotionCommand(MotionCommand):
         super().__init__(cfg, env)
         data = np.load(cfg.motion_file)
         names = [str(n) for n in data["body_names"]]
-        palms = data["body_pos_w"][:, [names.index(n) for n in cfg.palm_bodies]]
-        self.ball_start = torch.tensor(palms.mean(axis=1), dtype=torch.float32, device=self.device)
-        self.release_frame = int(data["release_frame"])
+        ids = [names.index(n) for n in cfg.palm_bodies]
+        grasp = grasp_points(torch.tensor(data["body_pos_w"][:, ids], dtype=torch.float32, device=self.device),
+                             torch.tensor(data["body_quat_w"][:, ids], dtype=torch.float32, device=self.device))
+        self.ball_start = grasp.mean(dim=1)
+        self.release_frame = int(data["release_frame"]) if cfg.release_frame is None else cfg.release_frame
+        # episodes start once the reference hands are on the ball (the jump-shot clip opens with the hands apart)
+        on_ball = torch.norm(grasp[:, 0] - grasp[:, 1], dim=1) < cfg.max_start_gap
+        self.first_frame = int(torch.nonzero(on_ball)[0, 0])
         root = names.index(cfg.root_body)
         x_release = float(data["body_pos_w"][self.release_frame, root, 0])
         self.hoop_pos = torch.tensor([x_release + cfg.shot_distance, 0.0, cfg.rim_height], device=self.device)
@@ -208,15 +213,15 @@ class BallMotionCommand(MotionCommand):
             return
         n = len(env_ids)
         dev = self.device
-        hi = max(self.release_frame - self.cfg.min_frames_before_release, 1)
-        t0 = torch.randint(0, hi, (n,), device=dev) if self.cfg.random_start else torch.zeros(n, dtype=torch.long,
-                                                                                                device=dev)
+        lo = self.first_frame
+        hi = max(self.release_frame - self.cfg.min_frames_before_release, lo + 1)
+        t0 = torch.randint(lo, hi, (n,), device=dev) if self.cfg.random_start else torch.full((n,), lo, device=dev)
         root_pos = self.root_pos[t0] + self._env.scene.env_origins[env_ids]
         root_vel = torch.cat([self.root_lin_vel[t0], self.root_ang_vel[t0]], dim=1)
         self.robot.write_root_pose_to_sim(torch.cat([root_pos, self.root_quat[t0]], dim=1), env_ids=env_ids)
         self.robot.write_root_velocity_to_sim(root_vel, env_ids=env_ids)
         self.robot.write_joint_state_to_sim(self.joint_pos[t0], self.joint_vel[t0], env_ids=env_ids)
-        # ball between the palms, moving with the hands
+        # ball between the palm centers
         ball = self._env.scene[self.cfg.ball_name]
         pose = torch.zeros(n, 7, device=dev)
         pose[:, :3] = self.ball_start[t0] + self._env.scene.env_origins[env_ids]
@@ -238,6 +243,10 @@ class BallMotionCommandCfg(MotionCommandCfg):
     hoop_name: str = "hoop"
     palm_bodies: tuple[str, str] = ("left_hand_palm_link", "right_hand_palm_link")
     min_frames_before_release: int = 15
+    # the retargeter's release frame is the peak of the human wrist height, i.e. the top of the follow-through
+    # when the hand has nearly stopped; override with the frame where the reference hands start to separate
+    release_frame: int | None = None
+    max_start_gap: float = 0.3  # palm-center separation at which the hands count as holding the ball
     shot_distance: float = 4.19  # rim center ahead of the pelvis at the release frame (free throw: 4.19 m)
     rim_height: float = 3.05
 
@@ -247,10 +256,31 @@ class BallMotionCommandCfg(MotionCommandCfg):
 ##
 
 
-def palm_center(env: ManagerBasedRLEnv, palms=("left_hand_palm_link", "right_hand_palm_link")) -> torch.Tensor:
+PALMS = ("left_hand_palm_link", "right_hand_palm_link")
+# the Dex3 palm link frame sits at the heel of the hand with x along the fingers: the palm spans x = 0..0.087 m and
+# the fingers reach 0.175 m, so the palm center is 6 cm out along x
+PALM_CENTER_OFFSET = (0.06, 0.0, 0.0)
+
+
+def grasp_points(pos: torch.Tensor, quat: torch.Tensor) -> torch.Tensor:
+    """Palm centers from palm link poses (..., 3) / (..., 4)."""
+    off = torch.tensor(PALM_CENTER_OFFSET, device=pos.device).expand(pos.shape)
+    return pos + quat_apply(quat, off)
+
+
+def palm_center(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Midpoint of the two palm centers: where the ball sits while held."""
     robot = env.scene["robot"]
-    ids = [robot.body_names.index(n) for n in palms]
-    return robot.data.body_pos_w[:, ids].mean(dim=1)
+    ids = [robot.body_names.index(n) for n in PALMS]
+    return grasp_points(robot.data.body_pos_w[:, ids], robot.data.body_quat_w[:, ids]).mean(dim=1)
+
+
+def palm_center_vel(env: ManagerBasedRLEnv) -> torch.Tensor:
+    robot = env.scene["robot"]
+    ids = [robot.body_names.index(n) for n in PALMS]
+    r = quat_apply(robot.data.body_quat_w[:, ids],
+                   torch.tensor(PALM_CENTER_OFFSET, device=env.device).expand(env.num_envs, 2, 3))
+    return (robot.data.body_lin_vel_w[:, ids] + torch.cross(robot.data.body_ang_vel_w[:, ids], r, dim=-1)).mean(dim=1)
 
 
 def ball_released(env: ManagerBasedRLEnv, threshold: float = 0.25) -> torch.Tensor:
@@ -288,8 +318,17 @@ class ball_through_rim(ManagerTermBase):
         return crossed & (torch.norm(xy, dim=1) < rim_radius)
 
 
-def ball_dropped(env: ManagerBasedRLEnv, min_height: float = 0.35) -> torch.Tensor:
-    return env.scene["ball"].data.root_pos_w[:, 2] - env.scene.env_origins[:, 2] < min_height
+def ball_dropped(env: ManagerBasedRLEnv, min_height: float = 0.35, early_frames: int = 8,
+                 command_name: str = "motion") -> torch.Tensor:
+    """Ball near the floor, or let go more than ``early_frames`` before the reference release (an early throw).
+
+    Without the early-release rule the policy threw the ball away at the start of every episode: it collected a
+    small aim reward and ended the episode before having to balance through the motion.
+    """
+    c = _cmd(env, command_name)
+    low = env.scene["ball"].data.root_pos_w[:, 2] - env.scene.env_origins[:, 2] < min_height
+    early = ball_released(env) & (c.time_steps < c.release_frame - early_frames)
+    return low | early
 
 
 def ball_missed(env: ManagerBasedRLEnv, margin: float = 0.4) -> torch.Tensor:
@@ -309,10 +348,13 @@ class ballistic_aim(ManagerTermBase):
     def reset(self, env_ids=None):
         self._released[slice(None) if env_ids is None else env_ids] = False
 
-    def __call__(self, env: ManagerBasedRLEnv, std_fraction: float = 0.3) -> torch.Tensor:
+    def __call__(self, env: ManagerBasedRLEnv, std_fraction: float = 0.3, window: int = 5,
+                 command_name: str = "motion") -> torch.Tensor:
         released = ball_released(env)
         just = released & ~self._released
         self._released |= released
+        c = _cmd(env, command_name)
+        just = just & (c.time_steps >= c.release_frame - window)  # no aim credit for early throws
         p = env.scene["ball"].data.root_pos_w
         v = env.scene["ball"].data.root_lin_vel_w
         hoop = env.scene["hoop"].data.root_pos_w
@@ -333,6 +375,58 @@ def ball_near_hoop(env: ManagerBasedRLEnv, std: float = 1.0) -> torch.Tensor:
     aim[:, 2] += 0.25
     d = torch.norm(env.scene["ball"].data.root_pos_w - aim, dim=1)
     return ball_released(env).float() * torch.exp(-d / std)
+
+
+def grasp_assist(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None, stiffness: float = 300.0,
+                 damping: float = 27.0, max_force: float = 60.0, command_name: str = "motion"):
+    """Interval event (every policy step): a spring-damper holds the ball at the palm center until the reference
+    release frame, then switches off and the ball flies with whatever velocity the whole body gave it.
+
+    Stands in for the grasp (the fingers are not actuated). Ball-robot contacts are filtered out (see
+    ``spawn_ball``): the retargeted hands overlap the ball by a few cm, and depenetration pushed the soft arms
+    (kp ~14 Nm/rad) apart within 4 steps (palm gap 0.24 -> 0.38 m) so the ball fell through.
+    Gravity is compensated while held; the force is capped at ``max_force`` (~10 g on a 0.62 kg ball).
+    """
+    c = _cmd(env, command_name)
+    ball = env.scene["ball"]
+    target = palm_center(env)
+    target_vel = palm_center_vel(env)
+    holding = (c.time_steps < c.release_frame).float().unsqueeze(1)
+    mass = 0.62
+    force = stiffness * (target - ball.data.root_pos_w) + damping * (target_vel - ball.data.root_lin_vel_w)
+    force[:, 2] += mass * 9.81
+    norm = torch.norm(force, dim=1, keepdim=True).clamp(min=1e-6)
+    force = force * torch.clamp(max_force / norm, max=1.0) * holding
+    ball.set_external_force_and_torque(force.unsqueeze(1), torch.zeros_like(force).unsqueeze(1), is_global=True)
+    # equal and opposite on the palms, so the robot carries the ball's weight and inertia
+    robot = env.scene["robot"]
+    ids = [robot.body_names.index(n) for n in PALMS]
+    reaction = (-0.5 * force).unsqueeze(1).expand(-1, 2, -1).contiguous()
+    robot.set_external_force_and_torque(reaction, torch.zeros_like(reaction), body_ids=ids, is_global=True)
+
+
+def release_velocity(env: ManagerBasedRLEnv, window: int = 6, launch_angle_deg: float = 52.0, std: float = 1.5,
+                     command_name: str = "motion") -> torch.Tensor:
+    """Dense shaping over the last ``window`` frames before the release: palm-center velocity vs the velocity that
+    sends the ball through the rim center at ``launch_angle_deg`` from where the hands are now.
+
+    The retargeted motion releases at ~1-3 m/s (no wrist / finger flick in the IK) while a free throw needs ~8 m/s;
+    the sparse ballistic-aim reward alone never found the extra speed (aim reward flat for 400 iterations).
+    """
+    c = _cmd(env, command_name)
+    p = palm_center(env)
+    hoop = env.scene["hoop"].data.root_pos_w
+    d = hoop[:, :2] - p[:, :2]
+    dx = torch.norm(d, dim=1).clamp(min=0.5)
+    dz = hoop[:, 2] - p[:, 2]
+    ang = torch.deg2rad(torch.tensor(launch_angle_deg, device=env.device))
+    den = (2.0 * torch.cos(ang) ** 2 * (dx * torch.tan(ang) - dz)).clamp(min=1e-3)
+    speed = torch.sqrt(9.81 * dx ** 2 / den)
+    v_req = torch.cat([d / dx.unsqueeze(1) * (speed * torch.cos(ang)).unsqueeze(1),
+                       (speed * torch.sin(ang)).unsqueeze(1)], dim=1)
+    err = torch.norm(palm_center_vel(env) - v_req, dim=1)
+    active = (c.time_steps >= c.release_frame - window) & (c.time_steps <= c.release_frame)
+    return active.float() * torch.exp(-err / std)
 
 
 def hold_ball(env: ManagerBasedRLEnv, std: float = 0.1, command_name: str = "motion") -> torch.Tensor:
@@ -405,31 +499,47 @@ def anchor_ori_exp(env: ManagerBasedRLEnv, std: float, command_name: str = "moti
     return torch.exp(-err / std**2)
 
 
-def body_pos_exp(env: ManagerBasedRLEnv, std: float, command_name: str = "motion") -> torch.Tensor:
+def _body_mean(c, err: torch.Tensor, free_arms: tuple[int, int] | None) -> torch.Tensor:
+    """Mean of a per-body error (num_envs, bodies). With ``free_arms = (pre, post)`` the elbows and wrists are left
+    out from ``pre`` frames before to ``post`` frames after the release (shooting tasks only): the retargeted push is
+    far too slow for a shot, and with them included a fast arm zeroed the whole tracking term."""
+    if free_arms is None:
+        return err.mean(-1)
+    arm = torch.tensor([("elbow" in n or "wrist" in n) for n in c.cfg.body_names], device=err.device)
+    shot = (c.time_steps >= c.release_frame - free_arms[0]) & (c.time_steps <= c.release_frame + free_arms[1])
+    w = (~(shot.unsqueeze(1) & arm.unsqueeze(0))).float()
+    return (err * w).sum(-1) / w.sum(-1)
+
+
+def body_pos_exp(env: ManagerBasedRLEnv, std: float, command_name: str = "motion",
+                 free_arms: tuple[int, int] | None = None) -> torch.Tensor:
     c = _cmd(env, command_name)
     pos, _ = c.aligned_ref_bodies()
-    err = torch.sum((pos - c.robot_body_pos_w) ** 2, dim=-1).mean(-1)
+    err = _body_mean(c, torch.sum((pos - c.robot_body_pos_w) ** 2, dim=-1), free_arms)
     return torch.exp(-err / std**2)
 
 
-def body_ori_exp(env: ManagerBasedRLEnv, std: float, command_name: str = "motion") -> torch.Tensor:
+def body_ori_exp(env: ManagerBasedRLEnv, std: float, command_name: str = "motion",
+                 free_arms: tuple[int, int] | None = None) -> torch.Tensor:
     c = _cmd(env, command_name)
     _, quat = c.aligned_ref_bodies()
-    err = (quat_error_magnitude(quat, c.robot_body_quat_w) ** 2).mean(-1)
+    err = _body_mean(c, quat_error_magnitude(quat, c.robot_body_quat_w) ** 2, free_arms)
     return torch.exp(-err / std**2)
 
 
-def body_lin_vel_exp(env: ManagerBasedRLEnv, std: float, command_name: str = "motion") -> torch.Tensor:
+def body_lin_vel_exp(env: ManagerBasedRLEnv, std: float, command_name: str = "motion",
+                     free_arms: tuple[int, int] | None = None) -> torch.Tensor:
     c = _cmd(env, command_name)
     vel = c.robot.data.body_lin_vel_w[:, c.robot_body_ids]
-    err = torch.sum((c.ref_body_lin_vel_w - vel) ** 2, dim=-1).mean(-1)
+    err = _body_mean(c, torch.sum((c.ref_body_lin_vel_w - vel) ** 2, dim=-1), free_arms)
     return torch.exp(-err / std**2)
 
 
-def body_ang_vel_exp(env: ManagerBasedRLEnv, std: float, command_name: str = "motion") -> torch.Tensor:
+def body_ang_vel_exp(env: ManagerBasedRLEnv, std: float, command_name: str = "motion",
+                     free_arms: tuple[int, int] | None = None) -> torch.Tensor:
     c = _cmd(env, command_name)
     vel = c.robot.data.body_ang_vel_w[:, c.robot_body_ids]
-    err = torch.sum((c.ref_body_ang_vel_w - vel) ** 2, dim=-1).mean(-1)
+    err = _body_mean(c, torch.sum((c.ref_body_ang_vel_w - vel) ** 2, dim=-1), free_arms)
     return torch.exp(-err / std**2)
 
 

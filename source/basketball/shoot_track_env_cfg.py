@@ -10,6 +10,7 @@ import os
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import RigidObjectCfg
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import TerminationTermCfg as DoneTerm
@@ -28,6 +29,29 @@ from .tracking_env_cfg import (
 )
 
 HOOP_USD = os.path.join(os.path.dirname(__file__), "assets", "nba_hoop.usda")
+
+
+def spawn_ball(prim_path, cfg, translation=None, orientation=None, **kwargs):
+    """Sphere spawner that also filters contacts between each env's ball and its robot (the held ball is attached
+    by ``tracking_mdp.grasp_assist``; rim, backboard and floor contacts are kept)."""
+    from pxr import Usd, UsdPhysics
+
+    from isaaclab.sim.utils import get_current_stage
+
+    prim = sim_utils.spawn_sphere(prim_path, cfg, translation, orientation, **kwargs)
+    stage = get_current_stage()
+    n = 0
+    for env_prim in stage.GetPrimAtPath(prim_path.rsplit("/", 2)[0]).GetChildren():
+        ball, robot = env_prim.GetChild("Ball"), env_prim.GetChild("Robot")
+        if not (ball.IsValid() and robot.IsValid()):
+            continue
+        rel = UsdPhysics.FilteredPairsAPI.Apply(ball).CreateFilteredPairsRel()
+        for link in Usd.PrimRange(robot):
+            if link.HasAPI(UsdPhysics.RigidBodyAPI):
+                rel.AddTarget(link.GetPath())
+        n += 1
+    print(f"[shoot] ball-robot contacts filtered in {n} envs ({len(rel.GetTargets())} links each)")
+    return prim
 FEET = ["left_ankle_roll_link", "right_ankle_roll_link"]
 
 
@@ -37,6 +61,7 @@ class ShootSceneCfg(TrackingSceneCfg):
         prim_path="{ENV_REGEX_NS}/Ball",
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.3, 0.0, 1.0)),
         spawn=sim_utils.SphereCfg(
+            func=spawn_ball,
             radius=0.1193,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(max_depenetration_velocity=1.0, max_linear_velocity=40.0),
             mass_props=sim_utils.MassPropertiesCfg(mass=0.62),
@@ -58,7 +83,7 @@ class ShootSceneCfg(TrackingSceneCfg):
 class ShootCommandsCfg:
     motion = mdp.BallMotionCommandCfg(
         motion_file=os.path.join(MOTION_DIR, "g1_124_04_ball.npz"), body_names=TRACKED_BODIES, debug_vis=False,
-        shot_distance=4.19,
+        shot_distance=4.19, release_frame=47,  # right palm speed peaks at 46, hands separate from 47
     )
 
 
@@ -78,7 +103,13 @@ class ShootRewardsCfg(RewardsCfg):
     made = RewTerm(func=mdp.terminated_by, weight=500.0, params={"term_name": "made"})
     dropped = RewTerm(func=mdp.terminated_by, weight=-200.0, params={"term_name": "dropped"})
     ball_near_hoop = RewTerm(func=mdp.ball_near_hoop, weight=2.0, params={"std": 1.0})
+    release_vel = RewTerm(func=mdp.release_velocity, weight=30.0, params={"window": 15, "std": 4.0})
     hold = RewTerm(func=mdp.hold_ball, weight=2.0, params={"std": 0.1})
+    # every failure ends the episode with the same penalty as a drop; with only drops penalized the policy learned
+    # to fall over on purpose whenever a drop was coming
+    fell_height = RewTerm(func=mdp.terminated_by, weight=-200.0, params={"term_name": "anchor_height"})
+    fell_tilt = RewTerm(func=mdp.terminated_by, weight=-200.0, params={"term_name": "anchor_tilt"})
+    fell_feet = RewTerm(func=mdp.terminated_by, weight=-200.0, params={"term_name": "end_effectors"})
 
 
 @configclass
@@ -105,15 +136,19 @@ class G1ShootTrackEnvCfg(G1TrackingEnvCfg):
         super().__post_init__()
         self.episode_length_s = 3.5
         self.events.push = None  # no shoves while shooting
-        # Dex3 fingers curled around the ball (signs follow each joint's range)
-        jp = dict(self.scene.robot.init_state.joint_pos)
-        jp.update({
-            "left_hand_index_.*": -0.5, "left_hand_middle_.*": -0.5, "right_hand_index_.*": 0.5,
-            "right_hand_middle_.*": 0.5, "left_hand_thumb_2_joint": 0.4, "right_hand_thumb_2_joint": -0.4,
-        })
-        self.scene.robot = self.scene.robot.replace(init_state=self.scene.robot.init_state.replace(joint_pos=jp))
-        self.scene.robot.actuators["hands"].stiffness = 10.0
-        self.scene.robot.actuators["hands"].damping = 0.5
+        # grasp assist until the reference release frame (see tracking_mdp.grasp_assist)
+        self.events.grasp = EventTerm(func=mdp.grasp_assist, mode="interval", interval_range_s=(0.02, 0.02))
+        # elbows / wrists drop out of the body tracking terms from 15 frames before to 10 after the release, so the
+        # arms can find a push fast enough for the shot (legs, torso and the rest of the motion still track the human)
+        for term in (self.rewards.body_pos, self.rewards.body_ori, self.rewards.body_lin_vel, self.rewards.body_ang_vel):
+            term.params["free_arms"] = (15, 10)
+        # stiffer arms for throwing: with the tracking gains (kp ~14 Nm/rad from armature * (2 pi 10 Hz)^2) full
+        # torque needed ~4x the usual action size and release speed plateaued at ~3 m/s (a free throw needs ~8).
+        # kp 40 / kd 2 is in the range of Unitree's own G1 arm gains; torque and speed limits are unchanged.
+        self.scene.robot.actuators["arm"].stiffness = 40.0
+        self.scene.robot.actuators["arm"].damping = 2.0
+        # fingers stay at the tracking defaults: a curled default pose shifted the finger joint observations far
+        # outside what the tracking policy's normalizer had seen (warm start fell in ~8 steps instead of ~22)
         self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
         self.sim.physx.gpu_total_aggregate_pairs_capacity = 32 * 1024
         self.viewer.eye = (-2.5, -3.0, 2.0)
@@ -137,6 +172,7 @@ class G1JumpShotEnvCfg(G1ShootTrackEnvCfg):
         super().__post_init__()
         self.commands.motion.motion_file = os.path.join(MOTION_DIR, "g1_124_05_ball.npz")
         self.commands.motion.shot_distance = 4.5
+        self.commands.motion.release_frame = 43  # top of the jump; the reference hands separate from 44
 
 
 @configclass

@@ -33,6 +33,9 @@ from isaaclab_tasks.utils import load_cfg_from_registry  # noqa: E402
 cfg = load_cfg_from_registry(args.task, "env_cfg_entry_point")
 for t in ("anchor_height", "anchor_tilt", "end_effectors"):
     setattr(cfg.terminations, t, None)  # PD-only playback will drift; watch the ball, not the balance
+for r in ("fell_height", "fell_tilt", "fell_feet"):
+    if hasattr(cfg.rewards, r):
+        setattr(cfg.rewards, r, None)
 env = gym.make(args.task, cfg=cfg, render_mode="rgb_array")
 env = gym.wrappers.RecordVideo(env, video_folder=args.out, step_trigger=lambda s: s == 0, video_length=args.steps,
                                disable_logger=True)
