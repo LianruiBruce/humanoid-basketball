@@ -69,5 +69,8 @@ for k in range(args.steps):
     fired = [n for n in tm.active_terms if tm.get_term(n)[0]]
     print(f"[dbg] step {k:2d} frame {cmd.time_steps[0].item():3d}  palm gap {torch.norm(pl - pr):.3f}  "
           f"ball-palm {[round(x, 3) for x in rel.tolist()]}  |d| {torch.norm(rel):.3f}  "
-          f"ball v {[round(x, 2) for x in ball.data.root_lin_vel_w[0].tolist()]}  last env |d| {rel_last:.3f}  {fired}")
+          f"ball v {[round(x, 2) for x in ball.data.root_lin_vel_w[0].tolist()]}  "
+          f"needed {[round(x, 2) for x in tm_mdp.required_release_velocity(base)[0].tolist()]}  "
+          f"ball-rim {[round(x, 2) for x in (ball.data.root_pos_w[0] - base.scene['hoop'].data.root_pos_w[0]).tolist()]}"
+          f"  {fired}")
 os._exit(0)

@@ -1,9 +1,12 @@
 """Whole-body shooting: the G1 tracks a retargeted human shot (free throw or jump shot) on an NBA court, holding a
 size-7 ball in its Dex3 hands, and is rewarded for making the shot.
 
-Tracking rewards keep the motion human-like; the shot terms (ballistic aim at release, make bonus, drop penalty)
-let the arms deviate from the reference where needed: the retargeted human motion is too slow to reach the rim on
-its own, so wrists are excluded from the fall terminations.
+Tracking rewards keep the motion human-like; the shot terms (ballistic aim at release, make bonus, drop penalty,
+release-velocity shaping) push it to score. The retargeted human push only reaches ~2-3 m/s at the palms (the IK has
+no wrist / finger flick) while a shot needs ~8 m/s, and PPO never found the extra speed by itself, so the
+``*_shot`` references keep the human motion up to the set point and splice in a push found by search
+(scripts/cem_push.py: CEM over joint-target offsets on top of a balancing tracking policy, then the joint angles the
+robot actually reached; scripts/splice_push.py).
 """
 
 import os
@@ -82,7 +85,7 @@ class ShootSceneCfg(TrackingSceneCfg):
 @configclass
 class ShootCommandsCfg:
     motion = mdp.BallMotionCommandCfg(
-        motion_file=os.path.join(MOTION_DIR, "g1_124_04_ball.npz"), body_names=TRACKED_BODIES, debug_vis=False,
+        motion_file=os.path.join(MOTION_DIR, "g1_124_04_shot.npz"), body_names=TRACKED_BODIES, debug_vis=False,
         shot_distance=4.19, release_frame=47,  # right palm speed peaks at 46, hands separate from 47
     )
 
@@ -138,10 +141,6 @@ class G1ShootTrackEnvCfg(G1TrackingEnvCfg):
         self.events.push = None  # no shoves while shooting
         # grasp assist until the reference release frame (see tracking_mdp.grasp_assist)
         self.events.grasp = EventTerm(func=mdp.grasp_assist, mode="interval", interval_range_s=(0.02, 0.02))
-        # elbows / wrists drop out of the body tracking terms from 15 frames before to 10 after the release, so the
-        # arms can find a push fast enough for the shot (legs, torso and the rest of the motion still track the human)
-        for term in (self.rewards.body_pos, self.rewards.body_ori, self.rewards.body_lin_vel, self.rewards.body_ang_vel):
-            term.params["free_arms"] = (15, 10)
         # stiffer arms for throwing: with the tracking gains (kp ~14 Nm/rad from armature * (2 pi 10 Hz)^2) full
         # torque needed ~4x the usual action size and release speed plateaued at ~3 m/s (a free throw needs ~8).
         # kp 40 / kd 2 is in the range of Unitree's own G1 arm gains; torque and speed limits are unchanged.
@@ -170,13 +169,80 @@ class G1JumpShotEnvCfg(G1ShootTrackEnvCfg):
 
     def __post_init__(self):
         super().__post_init__()
-        self.commands.motion.motion_file = os.path.join(MOTION_DIR, "g1_124_05_ball.npz")
+        self.commands.motion.motion_file = os.path.join(MOTION_DIR, "g1_124_05_shot.npz")
         self.commands.motion.shot_distance = 4.5
         self.commands.motion.release_frame = 43  # top of the jump; the reference hands separate from 44
 
 
 @configclass
 class G1JumpShotEnvCfg_PLAY(G1JumpShotEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 4
+        self.observations.policy.enable_corruption = False
+        self.commands.motion.random_start = False
+
+
+PUSH_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data", "motions")
+
+
+def _use_push(cfg, motion: str, push: str):
+    """Human reference + a feedforward push from scripts/cem_push.py; the policy learns the corrections. Elbows and
+    wrists leave the body tracking terms around the release so tracking does not learn to cancel the push."""
+    cfg.commands.motion.motion_file = os.path.join(MOTION_DIR, motion)
+    joints = cfg.actions.joints
+    cfg.actions.joints = mdp.PushJointPositionActionCfg(
+        asset_name=joints.asset_name, joint_names=joints.joint_names, scale=joints.scale,
+        use_default_offset=joints.use_default_offset, push_file=os.path.join(PUSH_DIR, push))
+    for term in (cfg.rewards.body_pos, cfg.rewards.body_ori, cfg.rewards.body_lin_vel, cfg.rewards.body_ang_vel):
+        term.params["free_arms"] = (15, 10)
+    # the push was found from episodes that start at the first frame; reference-state starts just before the push
+    # put the robot in states it was never tuned for. Starts are still spread over the first 10 frames (well before
+    # the push) so the envs are not all in the same phase: with synchronized starts the first PPO updates broke the
+    # policy (100% falls within 6 iterations)
+    cfg.commands.motion.min_frames_before_release = cfg.commands.motion.release_frame - 10
+    # the full-speed push leaves little balance margin: with observation noise every episode fell at the push start
+    cfg.observations.policy.enable_corruption = False
+    cfg.observations.policy.actions = ObsTerm(func=mdp.last_action_with_push)
+    cfg.observations.critic.actions = ObsTerm(func=mdp.last_action_with_push)
+    # the push's leg drive lifts the feet off the reference (a small hop); falls are still caught by the torso
+    # height / tilt checks
+    cfg.terminations.end_effectors = None
+    cfg.rewards.fell_feet = None
+    # the push bends at the hips (torso > 0.35 m below the reference), and after a full-speed push the robot often
+    # loses balance while the ball is still in the air: falls only end the episode until 15 frames after the release
+    for name in ("anchor_height", "anchor_tilt"):
+        term = getattr(cfg.terminations, name)
+        params = dict(term.params, threshold=0.5) if name == "anchor_height" else dict(term.params)
+        term.params = {"func": term.func, "params": params}
+        term.func = mdp.until_release
+
+
+@configclass
+class G1ShootPushEnvCfg(G1ShootTrackEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        _use_push(self, "g1_124_04_ball.npz", "push_ft4.npz")
+
+
+@configclass
+class G1ShootPushEnvCfg_PLAY(G1ShootPushEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 4
+        self.observations.policy.enable_corruption = False
+        self.commands.motion.random_start = False
+
+
+@configclass
+class G1JumpShotPushEnvCfg(G1JumpShotEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        _use_push(self, "g1_124_05_ball.npz", "push_js3.npz")
+
+
+@configclass
+class G1JumpShotPushEnvCfg_PLAY(G1JumpShotPushEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.scene.num_envs = 4

@@ -252,6 +252,49 @@ class BallMotionCommandCfg(MotionCommandCfg):
 
 
 ##
+# Actions
+##
+
+
+class PushJointPositionAction(JointPositionAction):
+    """Joint position targets from the policy plus a fixed push found by scripts/cem_push.py, indexed by each env's
+    reference frame. The push gives the shot its speed; the policy keeps the balance and learns the corrections
+    (aim, timing) on top of it."""
+
+    def __init__(self, cfg: PushJointPositionActionCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        push = np.load(cfg.push_file)
+        names = [str(n) for n in push["joint_names"]]
+        cols = [names.index(self._asset.joint_names[i]) for i in self._joint_ids]
+        num_frames = env.command_manager.get_term(cfg.command_name).num_frames
+        table = np.zeros((num_frames + 1, len(cols)), dtype=np.float32)
+        for f, row in zip(push["frames"], push["offsets"]):
+            if 0 <= f <= num_frames:
+                table[f] = row[cols]
+        self._push = torch.tensor(table, device=self.device)
+        self._command_name = cfg.command_name
+
+    def process_actions(self, actions: torch.Tensor):
+        # added in action units, as in the search, so the policy's last-action observation includes the push
+        frame = self._env.command_manager.get_term(self._command_name).time_steps.clamp(max=self._push.shape[0] - 1)
+        super().process_actions(actions + self._push[frame] / self._scale)
+
+
+def last_action_with_push(env: ManagerBasedRLEnv, action_name: str = "joints") -> torch.Tensor:
+    """Last action including the feedforward push (``mdp.last_action`` reads the policy output only). The push was
+    found with the push inside the policy's last-action input; without it the policy reacted differently and the
+    release lost ~2 m/s of vertical speed."""
+    return env.action_manager.get_term(action_name).raw_actions
+
+
+@configclass
+class PushJointPositionActionCfg(JointPositionActionCfg):
+    class_type: type = PushJointPositionAction
+    push_file: str = MISSING
+    command_name: str = "motion"
+
+
+##
 # Ball / shot terms (Dex3 palms)
 ##
 
@@ -377,32 +420,52 @@ def ball_near_hoop(env: ManagerBasedRLEnv, std: float = 1.0) -> torch.Tensor:
     return ball_released(env).float() * torch.exp(-d / std)
 
 
-def grasp_assist(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None, stiffness: float = 300.0,
-                 damping: float = 27.0, max_force: float = 60.0, command_name: str = "motion"):
-    """Interval event (every policy step): a spring-damper holds the ball at the palm center until the reference
-    release frame, then switches off and the ball flies with whatever velocity the whole body gave it.
+def grasp_assist(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None, max_force: float = 150.0,
+                 command_name: str = "motion"):
+    """Interval event (every policy step): until the reference release frame the ball is held rigidly at the palm
+    center (its position and velocity are set to the palm center's), then it is let go and flies with the velocity
+    the whole body gave the hands.
 
     Stands in for the grasp (the fingers are not actuated). Ball-robot contacts are filtered out (see
     ``spawn_ball``): the retargeted hands overlap the ball by a few cm, and depenetration pushed the soft arms
-    (kp ~14 Nm/rad) apart within 4 steps (palm gap 0.24 -> 0.38 m) so the ball fell through.
-    Gravity is compensated while held; the force is capped at ``max_force`` (~10 g on a 0.62 kg ball).
+    (kp ~14 Nm/rad) apart within 4 steps (palm gap 0.24 -> 0.38 m) so the ball fell through. A spring-damper
+    attachment (<= 60 N) was tried first, but in a fast push the ball lagged the hands and left at ~half their
+    speed. The force the ball needs, m (dv/dt - g), acts on the palms (capped at ``max_force``).
     """
     c = _cmd(env, command_name)
     ball = env.scene["ball"]
-    target = palm_center(env)
-    target_vel = palm_center_vel(env)
-    holding = (c.time_steps < c.release_frame).float().unsqueeze(1)
-    mass = 0.62
-    force = stiffness * (target - ball.data.root_pos_w) + damping * (target_vel - ball.data.root_lin_vel_w)
-    force[:, 2] += mass * 9.81
-    norm = torch.norm(force, dim=1, keepdim=True).clamp(min=1e-6)
-    force = force * torch.clamp(max_force / norm, max=1.0) * holding
-    ball.set_external_force_and_torque(force.unsqueeze(1), torch.zeros_like(force).unsqueeze(1), is_global=True)
-    # equal and opposite on the palms, so the robot carries the ball's weight and inertia
     robot = env.scene["robot"]
+    # events run after the frame counter advanced, so this lets go with the palm velocity of the step whose rewards
+    # saw frame == release_frame (the last step of the release-velocity window)
+    holding = c.time_steps <= c.release_frame + 1
+    v_palm = palm_center_vel(env)
+    # the ball flew freely for one step since the last write, so (v_palm - v_ball) / dt = a_palm - g
+    force = 0.62 * (v_palm - ball.data.root_lin_vel_w) / env.step_dt
+    norm = torch.norm(force, dim=1, keepdim=True).clamp(min=1e-6)
+    force = force * torch.clamp(max_force / norm, max=1.0) * holding.float().unsqueeze(1)
     ids = [robot.body_names.index(n) for n in PALMS]
     reaction = (-0.5 * force).unsqueeze(1).expand(-1, 2, -1).contiguous()
     robot.set_external_force_and_torque(reaction, torch.zeros_like(reaction), body_ids=ids, is_global=True)
+    held = torch.nonzero(holding).squeeze(1)
+    if len(held) > 0:
+        pose = torch.cat([palm_center(env)[held], ball.data.root_quat_w[held]], dim=1)
+        vel = torch.cat([v_palm[held], torch.zeros_like(v_palm[held])], dim=1)
+        ball.write_root_pose_to_sim(pose, env_ids=held)
+        ball.write_root_velocity_to_sim(vel, env_ids=held)
+
+
+def required_release_velocity(env: ManagerBasedRLEnv, launch_angle_deg: float = 52.0) -> torch.Tensor:
+    """Velocity that sends a ball from the palm center through the rim center at ``launch_angle_deg``."""
+    p = palm_center(env)
+    hoop = env.scene["hoop"].data.root_pos_w
+    d = hoop[:, :2] - p[:, :2]
+    dx = torch.norm(d, dim=1).clamp(min=0.5)
+    dz = hoop[:, 2] - p[:, 2]
+    ang = torch.deg2rad(torch.tensor(launch_angle_deg, device=env.device))
+    den = (2.0 * torch.cos(ang) ** 2 * (dx * torch.tan(ang) - dz)).clamp(min=1e-3)
+    speed = torch.sqrt(9.81 * dx ** 2 / den)
+    return torch.cat([d / dx.unsqueeze(1) * (speed * torch.cos(ang)).unsqueeze(1),
+                      (speed * torch.sin(ang)).unsqueeze(1)], dim=1)
 
 
 def release_velocity(env: ManagerBasedRLEnv, window: int = 6, launch_angle_deg: float = 52.0, std: float = 1.5,
@@ -414,17 +477,7 @@ def release_velocity(env: ManagerBasedRLEnv, window: int = 6, launch_angle_deg: 
     the sparse ballistic-aim reward alone never found the extra speed (aim reward flat for 400 iterations).
     """
     c = _cmd(env, command_name)
-    p = palm_center(env)
-    hoop = env.scene["hoop"].data.root_pos_w
-    d = hoop[:, :2] - p[:, :2]
-    dx = torch.norm(d, dim=1).clamp(min=0.5)
-    dz = hoop[:, 2] - p[:, 2]
-    ang = torch.deg2rad(torch.tensor(launch_angle_deg, device=env.device))
-    den = (2.0 * torch.cos(ang) ** 2 * (dx * torch.tan(ang) - dz)).clamp(min=1e-3)
-    speed = torch.sqrt(9.81 * dx ** 2 / den)
-    v_req = torch.cat([d / dx.unsqueeze(1) * (speed * torch.cos(ang)).unsqueeze(1),
-                       (speed * torch.sin(ang)).unsqueeze(1)], dim=1)
-    err = torch.norm(palm_center_vel(env) - v_req, dim=1)
+    err = torch.norm(palm_center_vel(env) - required_release_velocity(env, launch_angle_deg), dim=1)
     active = (c.time_steps >= c.release_frame - window) & (c.time_steps <= c.release_frame)
     return active.float() * torch.exp(-err / std)
 
@@ -569,6 +622,14 @@ def end_effector_height_error(env: ManagerBasedRLEnv, threshold: float, body_nam
     pos, _ = c.aligned_ref_bodies()
     err = torch.abs(pos[:, ids, 2] - c.robot_body_pos_w[:, ids, 2])
     return torch.any(err > threshold, dim=-1)
+
+
+def until_release(env: ManagerBasedRLEnv, func, params: dict, grace: int = 15, command_name: str = "motion"
+                  ) -> torch.Tensor:
+    """A termination ``func`` that only applies up to ``grace`` frames after the reference release: the shot is
+    decided at the release, so the episode runs on until the ball resolves even if the robot loses balance."""
+    c = _cmd(env, command_name)
+    return func(env, **params) & (c.time_steps <= c.release_frame + grace)
 
 
 def motion_finished(env: ManagerBasedRLEnv, command_name: str = "motion") -> torch.Tensor:

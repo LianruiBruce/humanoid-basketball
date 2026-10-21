@@ -52,9 +52,9 @@ env_cfg = load_cfg_from_registry(args.task, "env_cfg_entry_point")
 env_cfg.scene.num_envs = args.num_envs if args.eval else 1
 d = env_cfg.commands.motion.shot_distance
 if args.side:
-    env_cfg.viewer.eye, env_cfg.viewer.lookat = (d / 2, -(d + 2.5), 1.9), (d / 2, 0.0, 1.6)
+    env_cfg.viewer.eye, env_cfg.viewer.lookat = (d / 2, -(d + 2.5), 1.6), (d / 2, 0.0, 1.5)
 else:
-    env_cfg.viewer.eye, env_cfg.viewer.lookat = (-2.6, -1.4, 1.6), (0.6 * d, 0.0, 1.7)
+    env_cfg.viewer.eye, env_cfg.viewer.lookat = (-1.8, -4.2, 1.5), (0.45 * d, 0.0, 1.45)
 env = gym.make(args.task, cfg=env_cfg, render_mode=None if args.eval else "rgb_array")
 if not args.eval:
     env = gym.wrappers.RecordVideo(env, video_folder=args.out, step_trigger=lambda s: s == 0,
@@ -68,11 +68,16 @@ policy = runner.get_inference_policy(device=base.device)
 tm = base.termination_manager
 outcomes = {n: 0 for n in tm.active_terms}
 episodes = 0
+aims = []  # per-episode ballistic aim score at the release, exp(-miss / std) in [0, 1]
 
 torch.inference_mode().__enter__()
 obs, _ = env.reset()
 for _ in range(args.steps):
+    rm = base.reward_manager
+    aim_before = rm._episode_sums["ballistic_aim"].clone() if "ballistic_aim" in rm.active_terms else None
     obs, _, dones, _ = env.step(policy(obs))
+    if aim_before is not None and dones.any():
+        aims += (aim_before[dones.bool()] / (rm.get_term_cfg("ballistic_aim").weight * base.step_dt)).tolist()
     episodes += int(dones.sum())
     for n in outcomes:
         outcomes[n] += int((tm.get_term(n) & dones.bool()).sum())
@@ -80,6 +85,11 @@ total = max(episodes, 1)
 print(f"[record] {args.task}: {episodes} episodes (an episode can end on several terms at once)")
 for n, k in outcomes.items():
     print(f"[record]   {n:14s} {k:6d}  ({100.0 * k / total:5.1f}%)")
+if aims:
+    import numpy as np
+    a = np.array(aims)
+    print(f"[record] aim score per episode: mean {a.mean():.3f}, quartiles {np.percentile(a, [25, 50, 75]).round(3)}, "
+          f">0.8: {(a > 0.8).mean():.2f}")
 if not args.eval:
     print(f"[record] video in {args.out}")
 env.close()
