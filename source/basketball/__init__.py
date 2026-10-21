@@ -163,6 +163,46 @@ gym.register(
 )
 
 gym.register(
+    id="Basketball-G1-ShootTrack-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.shoot_track_env_cfg:G1ShootTrackEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.agents:G1ShootTrackPPORunnerCfg",
+    },
+    disable_env_checker=True,
+)
+
+gym.register(
+    id="Basketball-G1-ShootTrack-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.shoot_track_env_cfg:G1ShootTrackEnvCfg_PLAY",
+        "rsl_rl_cfg_entry_point": f"{__name__}.agents:G1ShootTrackPPORunnerCfg",
+    },
+    disable_env_checker=True,
+)
+
+gym.register(
+    id="Basketball-G1-JumpShot-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.shoot_track_env_cfg:G1JumpShotEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.agents:G1JumpShotPPORunnerCfg",
+    },
+    disable_env_checker=True,
+)
+
+gym.register(
+    id="Basketball-G1-JumpShot-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.shoot_track_env_cfg:G1JumpShotEnvCfg_PLAY",
+        "rsl_rl_cfg_entry_point": f"{__name__}.agents:G1JumpShotPPORunnerCfg",
+    },
+    disable_env_checker=True,
+)
+
+gym.register(
     id="Basketball-Shoot-Franka-Play-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     kwargs={

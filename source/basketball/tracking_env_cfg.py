@@ -198,7 +198,10 @@ class RewardsCfg:
     body_lin_vel = RewTerm(func=mdp.body_lin_vel_exp, weight=1.0, params={"std": 1.0})
     body_ang_vel = RewTerm(func=mdp.body_ang_vel_exp, weight=1.0, params={"std": 3.14})
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.1)
-    joint_limit = RewTerm(func=mdp.joint_pos_limits, weight=-10.0, params={"asset_cfg": SceneEntityCfg("robot")})
+    # body joints only: the Dex3 finger joints rest at 0, which is at their hard limit and outside the soft limits,
+    # so including them charged a constant penalty from the first step and the policy learned to fall immediately
+    joint_limit = RewTerm(func=mdp.joint_pos_limits, weight=-10.0,
+                          params={"asset_cfg": SceneEntityCfg("robot", joint_names=BODY_JOINT_EXPRS)})
 
 
 @configclass
@@ -241,3 +244,10 @@ class G1TrackingEnvCfg_PLAY(G1TrackingEnvCfg):
         self.scene.num_envs = 4
         self.observations.policy.enable_corruption = False
         self.events.push = None
+        # always play the whole clip from the first frame, without start noise
+        self.commands.motion.random_start = False
+        self.commands.motion.pose_noise = 0.0
+        self.commands.motion.vel_noise = 0.0
+        self.commands.motion.joint_noise = 0.0
+        self.viewer.eye = (0.6, -3.2, 1.2)
+        self.viewer.lookat = (0.4, 0.0, 0.85)

@@ -88,7 +88,7 @@ os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
 np.savez(args.out, fps=fps, joint_names=np.array(robot.joint_names), joint_pos=joint_pos,
          joint_vel=central_diff(joint_pos), body_names=np.array(robot.body_names), body_pos_w=body_pos,
          body_quat_w=body_quat, body_lin_vel_w=central_diff(body_pos), body_ang_vel_w=body_ang_vel,
-         source=str(ref["source"]))
+         source=str(ref["source"]), release_frame=int(ref["release_frame"]) if "release_frame" in ref else -1)
 sole = body_pos[:, [robot.body_names.index("left_ankle_roll_link"), robot.body_names.index("right_ankle_roll_link")], 2]
 print(f"[prep] {T} frames, pelvis z {body_pos[:, 0, 2].min():.2f}-{body_pos[:, 0, 2].max():.2f} m, "
       f"ankle z min {sole.min():.3f} m, max joint speed {np.abs(central_diff(joint_pos)).max():.1f} rad/s")

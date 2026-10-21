@@ -109,3 +109,15 @@ class G1TrackingPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
+
+
+@configclass
+class G1ShootTrackPPORunnerCfg(G1TrackingPPORunnerCfg):
+    experiment_name = "g1_shoot_track"
+    max_iterations = 3000
+
+
+@configclass
+class G1JumpShotPPORunnerCfg(G1TrackingPPORunnerCfg):
+    experiment_name = "g1_jump_shot"
+    max_iterations = 3000

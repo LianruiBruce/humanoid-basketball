@@ -26,6 +26,10 @@ parser.add_argument("--end", type=float, required=True, help="seconds")
 parser.add_argument("--fps", type=float, default=50.0)
 parser.add_argument("--iters", type=int, default=120)
 parser.add_argument("--out", required=True)
+parser.add_argument("--ball_hold", action="store_true",
+                    help="before the release, keep the hands at least --hold_gap apart (room for the ball)")
+parser.add_argument("--hold_gap", type=float, default=0.30, help="min wrist / knuckle separation while holding (m)")
+parser.add_argument("--smooth", type=float, default=0.3, help="weight of the temporal joint-smoothness term")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 app = AppLauncher(args).app
@@ -130,6 +134,10 @@ def main():
     pos = pos @ Rz.T
     hm = human_motion(names, pos)
     T = len(t_out)
+    # release frame: the right (shooting) wrist reaches its highest point relative to the pelvis
+    rw = pos[:, i["rwrist"], 2] - pos[:, i["root"], 2]
+    release_frame = int(np.argmax(rw))
+    print(f"[wb] release frame {release_frame} (t={t_out[release_frame]:.2f}s)")
     print(f"[wb] {T} frames at {args.fps:.0f} Hz from {os.path.basename(args.amc)} [{args.start}, {args.end}] s")
 
     sim = sim_utils.SimulationContext(sim_utils.SimulationCfg(dt=0.005, gravity=(0.0, 0.0, 0.0)))
@@ -158,6 +166,10 @@ def main():
 
     tt = lambda x: torch.tensor(x, dtype=torch.float32, device=dev)  # noqa: E731
     dirs = {k: [tt(d) for d in hm[f"{k}_dirs"]] for k in chains}
+    # 1 while holding, linear fade to 0 over the 10 frames after the release (an instant switch made the hands snap
+    # together at the release: joint speeds jumped from 21 to 41 rad/s)
+    frames = torch.arange(T, device=dev, dtype=torch.float32)
+    hold_weight = (1.0 - (frames - release_frame) / 10.0).clamp(0.0, 1.0)
     rot_targets = {  # body -> desired orientation in the pelvis frame (as quaternions)
         b("left_ankle_roll_link"): quat_from_matrix(tt(hm["left_foot_local"])),
         b("right_ankle_roll_link"): quat_from_matrix(tt(hm["right_foot_local"])),
@@ -180,16 +192,35 @@ def main():
             jac = robot.root_physx_view.get_jacobians()[..., jids]  # (T, bodies-1, 6, 29), fixed base
             bp = robot.data.body_pos_w
             rows_J, rows_e, pos_err, rot_err = [], [], [], []
+            # chain targets from the human segment directions
+            targets = {}
             for k, chain in chains.items():
                 p = bp[:, chain[0]]
+                targets[k] = []
                 for j in range(len(chain) - 1):
                     p = p + dirs[k][j] * seglen[k][j]
-                    w = torch.full((T, 1), pos_w[min(j, 2)] if "arm" in k else pos_w[min(j, 1)], device=dev)
                     if locks is not None and k in locks and j == 1:
                         tgt, mask = locks[k]
                         p = torch.where(mask[:, None], tgt, p)
-                        w = torch.where(mask[:, None], torch.full_like(w, 3.0), w)
-                    e = p - bp[:, chain[j + 1]]
+                    targets[k].append(p)
+            # ball-aware hands: before the release, keep wrists/knuckles at least `hold_gap` apart so a size-7 ball
+            # fits between the palms (the mocap subject held their hands closer than a real ball allows)
+            if args.ball_hold:
+                gap = args.hold_gap * hold_weight[:, None]  # fades out over 10 frames after the release
+                for j in (1, 2):
+                    pl, pr = targets["left_arm"][j], targets["right_arm"][j]
+                    mid, d = (pl + pr) / 2, pl - pr
+                    dist = torch.norm(d, dim=-1, keepdim=True).clamp(min=1e-6)
+                    widen = dist < gap
+                    half = d / dist * gap / 2
+                    targets["left_arm"][j] = torch.where(widen, mid + half, pl)
+                    targets["right_arm"][j] = torch.where(widen, mid - half, pr)
+            for k, chain in chains.items():
+                for j in range(len(chain) - 1):
+                    w = torch.full((T, 1), pos_w[min(j, 2)] if "arm" in k else pos_w[min(j, 1)], device=dev)
+                    if locks is not None and k in locks and j == 1:
+                        w = torch.where(locks[k][1][:, None], torch.full_like(w, 3.0), w)
+                    e = targets[k][j] - bp[:, chain[j + 1]]
                     rows_J.append(w[:, :, None] * jac[:, chain[j + 1] - 1, :3])
                     rows_e.append(w * e)
                     pos_err.append(torch.norm(e, dim=-1))
@@ -198,6 +229,13 @@ def main():
                 rows_J.append(rot_w[body] * jac[:, body - 1, 3:6])
                 rows_e.append(rot_w[body] * e)
                 rot_err.append(torch.norm(e, dim=-1))
+            # temporal smoothness: pull each frame toward the mean of its neighbours. Frames are solved in parallel,
+            # so without this, neighbouring frames can land on different wrist IK branches (a 2 rad flip in one frame)
+            if args.smooth > 0:
+                qb = q[:, jids]
+                q_nb = torch.cat([qb[:1], (qb[:-2] + qb[2:]) / 2, qb[-1:]], dim=0)
+                rows_J.append(args.smooth * torch.eye(len(jids), device=dev).expand(T, -1, -1))
+                rows_e.append(args.smooth * (q_nb - qb))
             J = torch.cat(rows_J, dim=1)
             e = torch.cat(rows_e, dim=1).unsqueeze(-1)
             JT = J.transpose(1, 2)
@@ -261,7 +299,8 @@ def main():
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     np.savez(args.out, fps=args.fps, joint_names=np.array(BODY_JOINTS), joint_pos=q[:, jids].cpu().numpy(),
              root_pos=root_pos, root_quat=root_quat, body_names=np.array(bn), body_pos=body_pos,
-             source=os.path.basename(args.amc), window=np.array([args.start, args.end]), scale=scale)
+             source=os.path.basename(args.amc), window=np.array([args.start, args.end]), scale=scale,
+             release_frame=release_frame, ball_hold=args.ball_hold)
     print(f"[wb] pelvis height {root_z.min():.2f}-{root_z.max():.2f} m, "
           f"root travel {np.linalg.norm(root_xy[-1] - root_xy[0]):.2f} m")
     print(f"[wb] saved {args.out}")
