@@ -211,7 +211,7 @@ def _use_push(cfg, motion: str, push: str):
             noise.n_min, noise.n_max = 0.3 * noise.n_min, 0.3 * noise.n_max
     cfg.observations.policy.actions = ObsTerm(func=mdp.last_action_with_push)
     cfg.observations.critic.actions = ObsTerm(func=mdp.last_action_with_push)
-    cfg.rewards.fallen_after_release = RewTerm(func=mdp.fallen_after_release, weight=-10.0)
+    cfg.rewards.fallen_after_release = RewTerm(func=mdp.fallen_after_release, weight=-40.0)
     # the push's leg drive lifts the feet off the reference (a small hop); falls are still caught by the torso
     # height / tilt checks
     cfg.terminations.end_effectors = None
