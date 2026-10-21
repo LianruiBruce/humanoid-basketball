@@ -107,6 +107,7 @@ class ShootRewardsCfg(RewardsCfg):
     dropped = RewTerm(func=mdp.terminated_by, weight=-200.0, params={"term_name": "dropped"})
     ball_near_hoop = RewTerm(func=mdp.ball_near_hoop, weight=2.0, params={"std": 1.0})
     release_vel = RewTerm(func=mdp.release_velocity, weight=30.0, params={"window": 15, "std": 4.0})
+    ball_track = RewTerm(func=mdp.ball_track, weight=10.0, params={"std": 0.5})
     hold = RewTerm(func=mdp.hold_ball, weight=2.0, params={"std": 0.1})
     # every failure ends the episode with the same penalty as a drop; with only drops penalized the policy learned
     # to fall over on purpose whenever a drop was coming
@@ -222,7 +223,7 @@ def _use_push(cfg, motion: str, push: str):
 class G1ShootPushEnvCfg(G1ShootTrackEnvCfg):
     def __post_init__(self):
         super().__post_init__()
-        _use_push(self, "g1_124_04_ball.npz", "push_ft4.npz")
+        _use_push(self, "g1_124_04_ball.npz", "push_ft5.npz")
 
 
 @configclass
@@ -238,7 +239,7 @@ class G1ShootPushEnvCfg_PLAY(G1ShootPushEnvCfg):
 class G1JumpShotPushEnvCfg(G1JumpShotEnvCfg):
     def __post_init__(self):
         super().__post_init__()
-        _use_push(self, "g1_124_05_ball.npz", "push_js3.npz")
+        _use_push(self, "g1_124_05_ball.npz", "push_js4.npz")
 
 
 @configclass

@@ -26,6 +26,10 @@ parser.add_argument("--reg", type=float, default=0.0, help="cost per rad of mean
                     "the human motion)")
 parser.add_argument("--roll_sigma", type=float, default=0.8, help="initial spread of the shoulder-roll offsets")
 parser.add_argument("--leg_sigma", type=float, default=0.3, help="initial spread of the leg / waist offsets")
+parser.add_argument("--cost", choices=("velocity", "miss"), default="velocity",
+                    help="velocity: distance to the 52 deg release velocity; miss: predicted miss at the rim plane")
+parser.add_argument("--init", default=None, help="start the search from the push saved in this file")
+parser.add_argument("--init_sigma", type=float, default=0.3, help="spread around --init")
 parser.add_argument("--upright_frames", type=int, default=14, help="frames after the release the robot must stay up")
 parser.add_argument("--out", required=True)
 parser.add_argument("--replay", action="store_true", help="re-run the best push saved in --out and store the joint "
@@ -82,6 +86,9 @@ dim = len(GROUPS) * KNOTS
 mu = torch.zeros(dim, device=dev)
 sigma = torch.tensor([(args.roll_sigma if g == 1 else 0.8) if g < 4 else args.leg_sigma for g in range(len(GROUPS))
                       for _ in range(KNOTS)], device=dev)
+if args.init:
+    mu = torch.tensor(np.load(args.init)["theta"], dtype=torch.float32, device=dev).flatten()
+    sigma = torch.minimum(sigma, torch.full_like(sigma, args.init_sigma))
 rel = cmd.release_frame
 start = rel - args.window
 print(f"[cem] joints per group: {[(k, int((M[:, g] != 0).sum())) for g, (k, _) in enumerate(GROUPS)]}")
@@ -115,6 +122,13 @@ def rollout(theta: torch.Tensor):
         if frame == rel:
             v_rel = tm_mdp.palm_center_vel(base).clone()
             v_req = tm_mdp.required_release_velocity(base).clone()
+        if frame == rel + 3:  # the ball is in free flight: predict where it crosses the rim plane on the way down
+            bp = base.scene["ball"].data.root_pos_w - base.scene["hoop"].data.root_pos_w
+            bv = base.scene["ball"].data.root_lin_vel_w
+            disc = bv[:, 2] ** 2 + 2.0 * 9.81 * bp[:, 2]
+            t = (bv[:, 2] + torch.sqrt(disc.clamp(min=0.0))) / 9.81
+            miss = torch.norm(bp[:, :2] + bv[:, :2] * t.unsqueeze(1), dim=1)
+            miss = torch.where(disc >= 0, miss, torch.norm(bp[:, :2], dim=1) - bp[:, 2])
         if frame <= rel + args.upright_frames:
             h = cmd.robot_anchor_pos_w[:, 2] - cmd.ref_anchor_pos_w[:, 2]
             fell |= (h.abs() > 0.25) | tm_mdp.anchor_tilt_error(base, threshold=0.8)
@@ -122,7 +136,7 @@ def rollout(theta: torch.Tensor):
         r = base.scene["ball"].data.root_pos_w - base.scene["hoop"].data.root_pos_w
         made |= (prev[:, 2] > 0) & (r[:, 2] <= 0) & (torch.norm(r[:, :2], dim=1) < 0.2286)
         prev = r.clone()
-    err = torch.norm(v_rel - v_req, dim=1)
+    err = torch.norm(v_rel - v_req, dim=1) if args.cost == "velocity" else miss
     cost = err + 5.0 * fell.float() - 3.0 * made.float() + args.reg * theta.abs().mean(1)
     rollout.made = made
     return cost, err, fell, v_rel, v_req
