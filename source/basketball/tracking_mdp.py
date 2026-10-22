@@ -667,6 +667,40 @@ def until_release(env: ManagerBasedRLEnv, func, params: dict, grace: int = 15, c
     return func(env, **params) & (c.time_steps <= c.release_frame + grace)
 
 
+def jump_height(env: ManagerBasedRLEnv, std: float = 0.05, pre: int = 15, post: int = 10,
+                command_name: str = "motion") -> torch.Tensor:
+    """Torso height vs the reference around the release: keeps the jump in the jump shot (the push + residual policy
+    otherwise learned to shoot flat-footed, 15 cm below the human's jump)."""
+    c = _cmd(env, command_name)
+    active = (c.time_steps >= c.release_frame - pre) & (c.time_steps <= c.release_frame + post)
+    err = torch.abs(c.ref_anchor_pos_w[:, 2] - c.robot_anchor_pos_w[:, 2])
+    return active.float() * torch.exp(-err / std)
+
+
+class tighten_foot_check(ManagerTermBase):
+    """Curriculum: lower the foot-height check of the jump (``until_release`` wrapping
+    ``end_effector_height_error``) by ``step`` whenever the share of episodes it ends stays below ``target``.
+
+    Tightening it in one go (0.18 -> 0.12 m) ended every episode before the release and the policy learned nothing.
+    """
+
+    def __init__(self, cfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self._rate = 0.0
+        self._calls = 0
+
+    def __call__(self, env: ManagerBasedRLEnv, env_ids, term_name: str = "end_effectors", lowest: float = 0.08,
+                 step: float = 0.005, target: float = 0.02, every: int = 600):
+        params = env.termination_manager.get_term_cfg(term_name).params["params"]
+        if len(env_ids) > 0:
+            hit = env.termination_manager.get_term(term_name)[env_ids].float().mean().item()
+            self._rate = 0.995 * self._rate + 0.005 * hit
+            self._calls += 1
+            if self._calls % every == 0 and self._rate < target and params["threshold"] > lowest:
+                params["threshold"] = max(lowest, params["threshold"] - step)
+        return {"foot_threshold": params["threshold"], "foot_term_rate": self._rate}
+
+
 def fallen_after_release(env: ManagerBasedRLEnv, height_threshold: float = 0.35, tilt_threshold: float = 0.8,
                          grace: int = 15, command_name: str = "motion") -> torch.Tensor:
     """1 per step while the robot is down after the release window (the fall terminations stop there so the shot can

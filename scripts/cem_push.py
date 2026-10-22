@@ -28,6 +28,10 @@ parser.add_argument("--roll_sigma", type=float, default=0.8, help="initial sprea
 parser.add_argument("--leg_sigma", type=float, default=0.3, help="initial spread of the leg / waist offsets")
 parser.add_argument("--cost", choices=("velocity", "miss"), default="velocity",
                     help="velocity: distance to the 52 deg release velocity; miss: predicted miss at the rim plane")
+parser.add_argument("--w_arm", type=float, default=0.0,
+                    help="cost per meter of mean elbow/wrist distance from the human reference during the push")
+parser.add_argument("--w_jump", type=float, default=0.0,
+                    help="cost per meter the pelvis stays below the reference (keeps the jump) during the push")
 parser.add_argument("--init", default=None, help="start the search from the push saved in this file")
 parser.add_argument("--init_sigma", type=float, default=0.3, help="spread around --init")
 parser.add_argument("--upright_frames", type=int, default=14, help="frames after the release the robot must stay up")
@@ -91,6 +95,8 @@ if args.init:
     sigma = torch.minimum(sigma, torch.full_like(sigma, args.init_sigma))
 rel = cmd.release_frame
 start = rel - args.window
+ARM_BODIES = [i for i, n in enumerate(cmd.cfg.body_names) if "elbow" in n or "wrist" in n]
+PELVIS = list(cmd.cfg.body_names).index("pelvis")
 print(f"[cem] joints per group: {[(k, int((M[:, g] != 0).sum())) for g, (k, _) in enumerate(GROUPS)]}")
 
 
@@ -114,6 +120,8 @@ def rollout(theta: torch.Tensor):
     v_req = torch.zeros(base.num_envs, 3, device=dev)
     fell = torch.zeros(base.num_envs, dtype=torch.bool, device=dev)
     made = torch.zeros(base.num_envs, dtype=torch.bool, device=dev)
+    arm_err = torch.zeros(base.num_envs, device=dev)
+    jump_err = torch.zeros(base.num_envs, device=dev)
     prev = torch.full((base.num_envs, 3), float("nan"), device=dev)
     for _ in range(rel + 60 - cmd.time_steps[0].item()):
         frame = cmd.time_steps[0].item()
@@ -129,6 +137,12 @@ def rollout(theta: torch.Tensor):
             t = (bv[:, 2] + torch.sqrt(disc.clamp(min=0.0))) / 9.81
             miss = torch.norm(bp[:, :2] + bv[:, :2] * t.unsqueeze(1), dim=1)
             miss = torch.where(disc >= 0, miss, torch.norm(bp[:, :2], dim=1) - bp[:, 2])
+        if start <= frame <= rel:  # style: stay close to the human motion while pushing
+            ref, _ = cmd.aligned_ref_bodies()
+            d = torch.norm(ref - cmd.robot_body_pos_w, dim=-1)
+            arm_err += d[:, ARM_BODIES].mean(dim=1) / (args.window + 1)
+            pz = cmd.robot_body_pos_w[:, PELVIS, 2] - ref[:, PELVIS, 2]
+            jump_err += (-pz).clamp(min=0.0) / (args.window + 1)
         if frame <= rel + args.upright_frames:
             h = cmd.robot_anchor_pos_w[:, 2] - cmd.ref_anchor_pos_w[:, 2]
             fell |= (h.abs() > 0.25) | tm_mdp.anchor_tilt_error(base, threshold=0.8)
@@ -137,7 +151,8 @@ def rollout(theta: torch.Tensor):
         made |= (prev[:, 2] > 0) & (r[:, 2] <= 0) & (torch.norm(r[:, :2], dim=1) < 0.2286)
         prev = r.clone()
     err = torch.norm(v_rel - v_req, dim=1) if args.cost == "velocity" else miss
-    cost = err + 5.0 * fell.float() - 3.0 * made.float() + args.reg * theta.abs().mean(1)
+    cost = err + 5.0 * fell.float() - 3.0 * made.float() + args.reg * theta.abs().mean(1)         + args.w_arm * arm_err + args.w_jump * jump_err
+    rollout.style = (arm_err, jump_err)
     rollout.made = made
     return cost, err, fell, v_rel, v_req
 
@@ -180,7 +195,8 @@ for it in range(args.iters):
         best = (cost[i].item(), theta[i].clone(), v_rel[i].tolist())
     print(f"[cem] iter {it:2d}  best err {err[i]:.2f} m/s (fell {bool(fell[i])})  v {[round(x, 2) for x in v_rel[i].tolist()]}"
           f"  need {[round(x, 2) for x in v_req[i].tolist()]}  mean-sample err {err[0]:.2f} made {bool(rollout.made[0])}"
-          f"  population made {rollout.made.float().mean():.2f} fell {fell.float().mean():.2f}",
+          f"  population made {rollout.made.float().mean():.2f} fell {fell.float().mean():.2f}"
+          f"  best arm err {rollout.style[0][i] * 100:.0f} cm, pelvis below ref {rollout.style[1][i] * 100:.0f} cm",
           flush=True)
 theta = best[1].view(len(GROUPS), KNOTS).cpu().numpy()
 frames = np.arange(start, rel + 9)

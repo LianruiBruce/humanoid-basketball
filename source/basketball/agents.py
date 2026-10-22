@@ -143,3 +143,9 @@ class G1ShootPushPPORunnerCfg(G1ShootTrackPPORunnerCfg):
 class G1JumpShotPushPPORunnerCfg(G1JumpShotPPORunnerCfg):
     experiment_name = "g1_jump_push"
     algorithm = PUSH_PPO
+
+
+@configclass
+class G1ShootJumpPushPPORunnerCfg(G1ShootTrackPPORunnerCfg):
+    experiment_name = "g1_shoot_jump"
+    algorithm = PUSH_PPO

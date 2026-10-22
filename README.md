@@ -4,15 +4,17 @@
   <img src="media/wholebody_free_throw.gif" width="420" alt="Unitree G1 whole-body free throw">
   <img src="media/wholebody_jump_shot.gif" width="420" alt="Unitree G1 whole-body jump shot">
 </p>
-<p align="center"><i>Left: free throw (4.19 m). Right: jump shot (4.5 m). Unitree G1, floating base, NVIDIA Isaac Lab.</i></p>
+<p align="center"><i>Left: free throw (4.19 m). Right: jump shot (free-throw form with a human vertical jump, released near the
+apex). Unitree G1, floating base, NVIDIA Isaac Lab.</i></p>
 
 A Unitree G1 humanoid shoots a **regulation basketball** (size 7, 0.62 kg) at a **regulation NBA hoop**
 (3.05 m rim) with its **whole body**. The robot balances on its own legs, its motion is tracked from **human motion
-capture** (CMU subject 124), and it runs on Unitree's motor torque and speed limits. Two shots are learned: a
-free throw from the free-throw line and a jump shot.
+capture** (CMU subject 124), and it runs on Unitree's motor torque and speed limits. Two shots are learned from the
+free-throw line: a set-shot free throw and a jump shot.
 
 ▶ Videos: [`media/wholebody_free_throw.mp4`](media/wholebody_free_throw.mp4) ·
-[`media/wholebody_jump_shot.mp4`](media/wholebody_jump_shot.mp4) · earlier arm-only version:
+[`media/wholebody_jump_shot.mp4`](media/wholebody_jump_shot.mp4) ·
+[`media/wholebody_jump_shot_side.mp4`](media/wholebody_jump_shot_side.mp4) (side view) · earlier arm-only version:
 [`media/demo.mp4`](media/demo.mp4)
 
 Everything here is simulation. The numbers are simulated make rates, not real-robot results.
@@ -21,10 +23,10 @@ Everything here is simulation. The numbers are simulated make rates, not real-ro
 
 **Whole-body shots** (deterministic policy, 256 parallel envs, more than 1,000 shots each):
 
-| Shot | Make rate | Single-env video | After the release |
+| Shot (4.19 m) | Make rate | Single-env video | Motion vs. the human reference |
 |---|---|---|---|
-| Free throw, 4.19 m | **53%** | 7 of 8 | stays up, arms in follow-through |
-| Jump shot, 4.5 m | **59%** | 11 of 11 | short crouch, stays up |
+| Free throw | **53%** | 7 of 8 | set shot, stays up, arms in follow-through |
+| Jump shot | **62%** | 6 of 8 | feet 21 cm off the floor (human 23 cm), pelvis 0.95 m (human 0.96 m), body error 7 cm at the release |
 
 Both start from the same human-motion tracking policy. Before the ball-flight tracking reward described below,
 the make rate was about 0.2%.
@@ -83,6 +85,26 @@ It follows the full free-throw clip (100/100 frames).
 - **Staying upright:** fall terminations stop shortly after the release so the shot can resolve. A dense
   post-release fall penalty keeps the robot from collapsing once it has let go.
 
+### 4. Jump shot: free-throw form + a human vertical jump
+[`scripts/compose_jump.py`](scripts/compose_jump.py)
+
+The first jump shot followed the CMU jump-shot clip (124_05) and scored 59%, but it looked nothing like one. The
+robot shot flat-footed (pelvis 15 cm below the human at the release, feet barely off the floor) with a forward chest
+push (arms 30–50 cm off the human). The push search was free to trade the human form for ball speed. Adding arm and
+jump costs to the search showed why: at the apex, with the arms overhead, the G1 can't produce the release speed.
+The human gets it from a wrist and finger flick, and the G1 wrist only has 5 Nm.
+
+What worked instead was keeping the free throw's upper body, which already had human-like form and a working push,
+and adding a jump:
+- **Motion composition:** waist, arms and pelvis orientation come from the free throw. Legs and pelvis height come
+  from the jump-shot clip, shifted 7 frames so its apex lands at the free-throw release. A second pass puts the stance
+  feet back on the floor.
+- **Keeping the jump:** the feet must follow the reference until the release, and torso height near the release is
+  rewarded. The foot-height tolerance is tightened by a curriculum from 0.13 m to 0.08 m whenever fewer than 2% of
+  episodes fail it. Tightening it in one step ended every episode before the release.
+- **Warm start** from the free-throw policy. The jump adds vertical speed at the release, and the ball-flight reward
+  re-tunes the aim.
+
 ### Pitfalls found along the way
 
 | Symptom | Cause | Fix |
@@ -95,6 +117,8 @@ It follows the full free-throw clip (100/100 frames).
 | PPO collapses within 6 iterations | All envs reset in lockstep, so each batch saw one motion phase | Starts spread over the first 10 frames |
 | 0% with one env, 70% with 64 envs | Isaac Lab's wrench composer caches link orientations until some env resets, so with one env (or envs in lockstep) global forces were rotated by stale palm orientations | Reset the composer every step |
 | Jump shot falls after every made basket | Fall terminations stop at the release window | Post-release fall penalty |
+| "Jump shot" that never jumps | Searched push + freed arms + no foot check: shooting flat-footed was easier | Free-throw form + composed human jump, foot-height curriculum |
+| Robot settles for an 8 cm hop | Foot check (0.18 m) loose enough to pass without jumping | Curriculum to 0.08 m, wider jump-reward kernel |
 
 ## Part 2: Arm-only shooting with an Adversarial Motion Prior
 
@@ -148,6 +172,8 @@ source/basketball/
 scripts/
   retarget_cmu_wholebody.py, prepare_motion.py, play_wholebody_reference.py   whole-body mocap pipeline
   cem_push.py           push search (CEM) on top of a tracking policy
+  compose_jump.py       jump shot reference: free-throw upper body + jump-shot legs
+  style_check.py        per-frame distance to the human reference (body, pelvis and foot height)
   record_shot.py        whole-body make-rate evaluation and video recording
   debug_shoot_policy.py, survival_test.py, speed_test.py, check_ball_filter.py   diagnostics
   train.py / play.py    RSL-RL train / play (from Isaac Lab)
@@ -161,7 +187,8 @@ checkpoints/            g1_wholebody_free_throw.pt, g1_wholebody_jump_shot.pt, g
 |---|---|
 | `Basketball-G1-Track-v0` | whole-body motion tracking (no ball) |
 | `Basketball-G1-ShootPush-v0` | whole-body free throw: tracking + push + RL residual (`checkpoints/g1_wholebody_free_throw.pt`) |
-| `Basketball-G1-JumpShotPush-v0` | whole-body jump shot (`checkpoints/g1_wholebody_jump_shot.pt`) |
+| `Basketball-G1-ShootJumpPush-v0` | whole-body jump shot: free-throw form + composed human jump (`checkpoints/g1_wholebody_jump_shot.pt`) |
+| `Basketball-G1-JumpShotPush-v0` | first jump-shot attempt on the CMU jump-shot clip (scores, but shoots flat-footed) |
 | `Basketball-G1-ShootTrack-v0`, `Basketball-G1-JumpShot-v0` | tracking with ball, no push (release too slow to score) |
 | `Basketball-G1-ShootAMP-v0`, `Basketball-G1-ShootRobust-v0` | arm-only (Part 2) |
 
@@ -188,8 +215,9 @@ Tested on Windows 11, RTX 4080 16 GB, Isaac Sim 5.1 + Isaac Lab v2.3.2 (Python 3
 python scripts/record_shot.py --headless --eval --task Basketball-G1-ShootPush-v0 --num_envs 256 --steps 600 --checkpoint checkpoints/g1_wholebody_free_throw.pt
 python scripts/record_shot.py --headless --task Basketball-G1-ShootPush-v0 --steps 1000 --checkpoint checkpoints/g1_wholebody_free_throw.pt --kit_args="--/app/vulkan=false"
 
-# whole-body jump shot
-python scripts/record_shot.py --headless --eval --task Basketball-G1-JumpShotPush-v0 --num_envs 256 --steps 600 --checkpoint checkpoints/g1_wholebody_jump_shot.pt
+# whole-body jump shot, plus how close it stays to the human reference (body error, pelvis and foot height per frame)
+python scripts/record_shot.py --headless --eval --task Basketball-G1-ShootJumpPush-v0 --num_envs 256 --steps 600 --checkpoint checkpoints/g1_wholebody_jump_shot.pt
+python scripts/style_check.py --headless --task Basketball-G1-ShootJumpPush-Play-v0 --checkpoint checkpoints/g1_wholebody_jump_shot.pt
 
 # whole-body pipeline from scratch
 python scripts/retarget_cmu_wholebody.py --headless --amc data/mocap/cmu_124/124_04.amc --start 3.4 --end 5.4 --ball_hold --out data/mocap/wholebody/g1_124_04_ball.npz
@@ -197,6 +225,10 @@ python scripts/prepare_motion.py --headless --ref data/mocap/wholebody/g1_124_04
 python scripts/train.py --task Basketball-G1-Track-v0 --headless
 python scripts/cem_push.py --headless --cost miss --leg_sigma 0.1 --upright_frames 45 --reg 1.5 --roll_sigma 0.2 --motion data/motions/g1_124_04_ball.npz --checkpoint <tracking-with-ball checkpoint> --out data/motions/push_ft.npz
 python scripts/train.py --task Basketball-G1-ShootPush-v0 --headless --resume --load_run <run> --checkpoint <model>
+# jump shot: compose the reference (see the script header for the 4-step compose / FK / ground-fix sequence), then
+# fine-tune the free-throw policy on it
+python scripts/compose_jump.py --out data/mocap/wholebody/g1_124_04_jump.npz
+python scripts/train.py --task Basketball-G1-ShootJumpPush-v0 --headless --resume --load_run <free-throw run> --checkpoint <model>
 
 # arm-only (Part 2)
 python scripts/eval_g1.py --headless --task Basketball-G1-ShootRobust-v0 --checkpoint checkpoints/g1_robust.pt --distances 2.0 4.19 6.75
@@ -209,9 +241,10 @@ python scripts/eval_g1.py --headless --task Basketball-G1-ShootRobust-v0 --check
 - **Grasp abstraction:** before the release the ball is held rigidly at the palm center and ball–robot contacts are
   filtered. The Dex3 fingers do not grip the ball.
 - **The push is not from mocap:** human motion is tracked up to the set point, but the fast push phase comes from
-  the CEM search plus RL. The free throw reads as a two-hand overhead push, not a one-hand NBA release with a
-  guide hand.
-- **One distance per task** (free-throw line, a fixed jump-shot spot), no shot-distance curriculum yet.
+  the CEM search plus RL. The shots read as a two-hand overhead push, not a one-hand NBA release with a guide hand.
+- **The jump shot is composed:** its upper body is the free throw and its legs come from a different clip. The jump
+  peaks a few frames later than the human's, so the ball leaves slightly before the apex.
+- **One distance:** both shots are from the free-throw line, no shot-distance curriculum yet.
 - **Fragility:** the make rate is sensitive to tiny state differences; observation noise is kept at 30% of the
   tracking level.
 

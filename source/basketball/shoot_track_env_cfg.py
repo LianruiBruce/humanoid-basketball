@@ -13,6 +13,7 @@ import os
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import RigidObjectCfg
+from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
@@ -225,6 +226,19 @@ def _use_push(cfg, motion: str, push: str):
         term.func = mdp.until_release
 
 
+def _enforce_jump(cfg):
+    """Keep the reference jump: the push + residual policy otherwise learned to shoot flat-footed (pelvis 15 cm
+    below the human at the release, feet barely off the floor). Feet and torso height are checked again until the
+    release window and the torso height is rewarded around the release."""
+    cfg.terminations.end_effectors = DoneTerm(
+        func=mdp.until_release, params={"func": mdp.end_effector_height_error,
+                                        "params": {"threshold": 0.13, "body_names": FEET}})
+    cfg.rewards.fell_feet = RewTerm(func=mdp.terminated_by, weight=-200.0, params={"term_name": "end_effectors"})
+    cfg.terminations.anchor_height.params["params"]["threshold"] = 0.3
+    # with a 0.18 m foot check and a 5 cm reward kernel the policy settled for an 8 cm hop (human: 23 cm)
+    cfg.rewards.jump = RewTerm(func=mdp.jump_height, weight=10.0, params={"std": 0.1})
+
+
 @configclass
 class G1ShootPushEnvCfg(G1ShootTrackEnvCfg):
     def __post_init__(self):
@@ -245,11 +259,40 @@ class G1ShootPushEnvCfg_PLAY(G1ShootPushEnvCfg):
 class G1JumpShotPushEnvCfg(G1JumpShotEnvCfg):
     def __post_init__(self):
         super().__post_init__()
-        _use_push(self, "g1_124_05_ball.npz", "push_js4.npz")
+        _use_push(self, "g1_124_05_ball.npz", "push_js5.npz")
+        _enforce_jump(self)
+        for term in (self.rewards.body_pos, self.rewards.body_ori, self.rewards.body_lin_vel, self.rewards.body_ang_vel):
+            term.params["free_arms"] = (4, 6)  # arms close to the human jump shot except right at the release
 
 
 @configclass
 class G1JumpShotPushEnvCfg_PLAY(G1JumpShotPushEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 4
+        self.observations.policy.enable_corruption = False
+        self.commands.motion.random_start = False
+
+
+@configclass
+class JumpCurriculumCfg:
+    foot_check = CurrTerm(func=mdp.tighten_foot_check)
+
+
+@configclass
+class G1ShootJumpPushEnvCfg(G1ShootPushEnvCfg):
+    """Free throw with a vertical jump: the free-throw upper body with the legs and pelvis height of the CMU jump
+    shot, apex at the release (scripts/compose_jump.py)."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.commands.motion.motion_file = os.path.join(MOTION_DIR, "g1_124_04_jump.npz")
+        _enforce_jump(self)
+        self.curriculum = JumpCurriculumCfg()
+
+
+@configclass
+class G1ShootJumpPushEnvCfg_PLAY(G1ShootJumpPushEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.scene.num_envs = 4
