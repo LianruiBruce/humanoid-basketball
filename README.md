@@ -1,17 +1,107 @@
-# Humanoid Basketball Shooting: RL + Human Motion Prior
+# Humanoid Basketball: Whole-Body Shooting from Human Motion Capture + RL
 
-<p align="center"><img src="media/free_throw.gif" width="560" alt="Unitree G1 making a free throw in Isaac Lab"></p>
+<p align="center">
+  <img src="media/wholebody_free_throw.gif" width="420" alt="Unitree G1 whole-body free throw">
+  <img src="media/wholebody_jump_shot.gif" width="420" alt="Unitree G1 whole-body jump shot">
+</p>
+<p align="center"><i>Left: free throw (4.19 m). Right: jump shot (4.5 m). Unitree G1, floating base, NVIDIA Isaac Lab.</i></p>
 
-A Unitree G1 humanoid with dexterous hands learns to shoot a **regulation basketball** (size 7, 0.62 kg) at a
-**regulation NBA hoop** (3.05 m rim, free-throw and 3-point lines) in NVIDIA Isaac Lab. It does this with
-**Unitree's real arm motor limits** (25 Nm, 37 rad/s), and its shooting form comes from **human motion capture**
-through an Adversarial Motion Prior.
+A Unitree G1 humanoid shoots a **regulation basketball** (size 7, 0.62 kg) at a **regulation NBA hoop**
+(3.05 m rim) with its **whole body**. The robot balances on its own legs, its motion is tracked from **human motion
+capture** (CMU subject 124), and it runs on Unitree's motor torque and speed limits. Two shots are learned: a
+free throw from the free-throw line and a jump shot.
 
-▶ **30-second demo:** [`media/demo.mp4`](media/demo.mp4)
+▶ Videos: [`media/wholebody_free_throw.mp4`](media/wholebody_free_throw.mp4) ·
+[`media/wholebody_jump_shot.mp4`](media/wholebody_jump_shot.mp4) · earlier arm-only version:
+[`media/demo.mp4`](media/demo.mp4)
 
 Everything here is simulation. The numbers are simulated make rates, not real-robot results.
 
 ## Results
+
+**Whole-body shots** (deterministic policy, 256 parallel envs, more than 1,000 shots each):
+
+| Shot | Make rate | Single-env video | After the release |
+|---|---|---|---|
+| Free throw, 4.19 m | **53%** | 7 of 8 | stays up, arms in follow-through |
+| Jump shot, 4.5 m | **59%** | 11 of 11 | short crouch, stays up |
+
+Both start from the same human-motion tracking policy. Before the ball-flight tracking reward described below,
+the make rate was about 0.2%.
+
+**Earlier arm-only version** (fixed pelvis, Inspire hands; [Part 2](#part-2-arm-only-shooting-with-an-adversarial-motion-prior)):
+84–90% from 2 m out to the 3-point line in clean simulation, and 72% / 49% (2 m / free throw) under full domain
+randomization.
+
+## Part 1: Whole-body shooting
+
+### 1. Retargeting human mocap to the whole G1
+[`scripts/retarget_cmu_wholebody.py`](scripts/retarget_cmu_wholebody.py)
+- The human root trajectory is scaled by the leg-length ratio (0.736). Human segment directions are matched by
+  29-DoF damped-least-squares IK in the pelvis frame, with every frame in its own sim env so all frames solve in
+  parallel. Mean error is 0.3–0.9 cm.
+- **Foot contact cleanup:** stance phases are detected on the human foot and the robot foot is pinned during them
+  (median slide < 1 cm/s). A temporal smoothness term stops neighbouring frames from landing on different wrist IK
+  branches.
+- **Room for the ball:** the subject's hands sit closer together than a real ball allows, so before the release
+  the wrist and knuckle targets are kept at least a ball's width apart (`--ball_hold`).
+
+### 2. Whole-body motion tracking (no ball)
+[`tracking_env_cfg.py`](source/basketball/tracking_env_cfg.py), [`tracking_mdp.py`](source/basketball/tracking_mdp.py)
+
+A BeyondMimic-style tracker on the floating-base G1 (29 body joints and Dex3 hands):
+- reference-state initialization;
+- torso anchor;
+- exponential-kernel rewards on body poses and velocities;
+- fall terminations;
+- an asymmetric critic;
+- PD gains derived from motor armature.
+
+It follows the full free-throw clip (100/100 frames).
+
+### 3. Ball and hoop
+[`shoot_track_env_cfg.py`](source/basketball/shoot_track_env_cfg.py)
+- **Grasp:** until the release frame, the ball is held rigidly at the palm center, i.e. its pose and velocity are set
+  to the palms'. The reaction force `m (a - g)` is applied to the palms, so the robot carries the ball's weight and
+  inertia. After the release frame the ball flies with exactly the velocity the whole body gave the hands.
+- **Release speed was the hard part.** The retargeted push only reaches ~2–3 m/s at the palms, because the human's
+  final ball speed comes from a wrist and finger flick the IK can't reproduce. A free throw needs ≥ 7.7 m/s, and
+  just reaching rim height takes 5.6 m/s vertical. PPO plateaued under a dense release-velocity reward, freed arms,
+  stiffer arm gains and more exploration noise.
+- **Push search** ([`scripts/cem_push.py`](scripts/cem_push.py)): the cross-entropy method (CEM) over 24 joint-offset
+  parameters, applied on top of the balancing tracking policy (256 envs, ~10 min). It searches for a push that gives
+  the right release velocity while the robot stays upright through the whole ball flight. Unconstrained, it found a
+  full-body dive that reaches the rim and crashes, so the leg offsets are kept small and the robot must stay up for
+  45 frames after the release.
+- **Push + RL residual:** the push is a feedforward term in the action
+  (`PushJointPositionAction`), and PPO learns the corrections on top of it.
+- **Synthesized ball-flight reference** (`ball_track`): the mocap has no ball, so at the release each env gets the
+  ideal 52° parabola from its own release point into the rim center. The ball is then rewarded for following that
+  parabola on every frame of the flight, similar to SkillMimic's object tracking. A one-time aim score at the release
+  was ~0 for nearly every shot. The dense version grades a slightly long, short or wide shot all the way to the rim,
+  and it took the make rate from ~0.2% to over 50%.
+- **Staying upright:** fall terminations stop shortly after the release so the shot can resolve. A dense
+  post-release fall penalty keeps the robot from collapsing once it has let go.
+
+### Pitfalls found along the way
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Ball drops 51–87% of the time, worse with a tighter grip | The Dex3 `palm_link` origin is at the heel of the hand, and the retargeted hands overlapped the ball, so depenetration pried the soft arms apart | Palm-center grasp point, ball–robot contacts filtered on every link |
+| Warm-started tracker falls in 8 steps | Curled default finger pose put the finger observations far outside the normalizer's range | Fingers at the tracking defaults |
+| Ball leaves at half the hand speed | Spring-damper grasp lagged the hands in a fast push | Rigid hold until the release |
+| Release frame on the follow-through | It was taken from the peak of the human wrist height | Frame where the reference hands separate |
+| Push found by search doesn't reproduce in the env | The policy's last-action observation didn't include the push | Last-action observation reads the action term, push included |
+| PPO collapses within 6 iterations | All envs reset in lockstep, so each batch saw one motion phase | Starts spread over the first 10 frames |
+| 0% with one env, 70% with 64 envs | Isaac Lab's wrench composer caches link orientations until some env resets, so with one env (or envs in lockstep) global forces were rotated by stale palm orientations | Reset the composer every step |
+| Jump shot falls after every made basket | Fall terminations stop at the release window | Post-release fall penalty |
+
+## Part 2: Arm-only shooting with an Adversarial Motion Prior
+
+The first version of the project: G1 + Inspire hands, fixed pelvis, a distance curriculum from 2 m to the 3-point
+line, and form from mocap through AMP.
+
+<p align="center"><img src="media/free_throw.gif" width="480" alt="Arm-only free throw"></p>
 
 **Clean simulation** (deterministic policy, ~2,000 shots per distance):
 
@@ -20,99 +110,62 @@ Everything here is simulation. The numbers are simulated make rates, not real-ro
 | RL + form rewards | 86% | 85% | 85% | 89% | 90% | 86% | 84% |
 | **+ human motion prior (AMP)** | **86%** | **89%** | **87%** | **85%** | **90%** | **90%** | **87%** |
 
-The motion prior made the motion human-like at no cost in accuracy. The discriminator's score on policy motion
-reached −0.40 (+1 = indistinguishable from the human; the first, saturated AMP attempt was stuck at −0.98), and
-pose similarity to the reference reached 0.94.
-
-**Robustness**: tested with control latency (0–10 ms), sensor noise, and randomized ball / link mass, friction,
-restitution, motor gains and joint friction:
+**Robustness** (control latency 0–10 ms, sensor noise, randomized ball / link mass, friction, restitution, motor
+gains and joint friction):
 
 | Policy | 2 m | Free throw | 3-pointer |
 |---|---|---|---|
 | Trained without randomization | 0% | 0% | 0% |
 | Fine-tuned with domain randomization | 31% | 32% | 18% |
-| **Trained from scratch with DR + 3-frame observation history + asymmetric actor-critic** | **72%** | **49%** | 0%* |
+| **From scratch with DR + 3-frame history + asymmetric actor-critic** | **72%** | **49%** | 0% |
 
-The policy trained without randomization drops the ball once 5–10 ms of latency is added: it had overfit to
-perfectly timed control. Domain randomization brought ball drops from ~60% to ~0.1%.
-\*The from-scratch robust policy never learned enough power for the 3-point range under full randomization (see
-[Limitations](#limitations)).
+- **Scene** ([`scripts/make_nba_hoop.py`](scripts/make_nba_hoop.py)): procedurally generated regulation hoop
+  (32-capsule rim, backboard, net) and half-court markings.
+- **Feasibility first** ([`scripts/feasibility_g1.py`](scripts/feasibility_g1.py)): torque-saturated swings reach
+  11.8 m/s palm speed, against 7.4 m/s needed for a free throw.
+- **Distance curriculum with review** (`reset_hoop_curriculum` in [`g1_mdp.py`](source/basketball/g1_mdp.py)): half
+  the episodes use the frontier distance, half review learned ones (training only the frontier forgot short shots).
+- **AMP** ([`amp.py`](source/basketball/amp.py)): an LSGAN discriminator over arm-feature transitions, trained inside
+  the reward term. The first attempt saturated and was fixed with a smaller discriminator, input noise, a stronger
+  gradient penalty, fewer updates, 100 Hz references, and a nearest-frame pose-matching term.
+- **Robustness:** sub-step latency ([`DelayedJointPositionAction`](source/basketball/g1_mdp.py)), a 3-frame
+  observation history for the actor, and a critic that sees the hidden randomization parameters.
 
-## How it works
-
-### 1. Task and physics
-- **Scene** ([`scripts/make_nba_hoop.py`](scripts/make_nba_hoop.py)): a procedurally generated regulation hoop
-  (32-capsule rim, backboard, net, support) and half-court markings.
-- **Robot** ([`g1_shoot_env_cfg.py`](source/basketball/g1_shoot_env_cfg.py)): G1 + Inspire hands, fixed pelvis,
-  gravity on, arm actuators clipped to Unitree's URDF limits. The ball starts squeezed between the palms, and there is
-  no "release" action: the ball leaves the hands only through arm motion.
-- **Feasibility first** ([`scripts/feasibility_g1.py`](scripts/feasibility_g1.py)): before training, torque-saturated
-  swings showed the arms reach 11.8 m/s palm speed, against 7.4 m/s needed for a free throw and 8.9 m/s for a
-  3-pointer.
-
-### 2. Learning to shoot (PPO, 4,096 parallel envs, one RTX 4080)
-- Rewards: made shot, a dense "ball near the hoop" term, a drop penalty, and form terms (release height and launch
-  angle paid only on makes, entry angle, ball kept on the shooting line, level hands).
-- **Distance curriculum with review** ([`g1_mdp.py`](source/basketball/g1_mdp.py) `reset_hoop_curriculum`): half the
-  episodes use the current farthest distance, half re-sample distances already learned. The first version only
-  trained the frontier and forgot short shots (2 m make rate fell to 2%).
-
-### 3. Human-like form from motion capture
-- **Data:** CMU Graphics Lab Motion Capture Database, subject 124 (basketball shot, free throw, jump shot).
-- **Retargeting** ([`scripts/retarget_cmu_to_g1.py`](scripts/retarget_cmu_to_g1.py)): upper-arm, forearm and hand
-  directions are taken in the human torso frame and rebuilt with the G1's segment lengths. Damped-least-squares IK is
-  then solved for both 7-DoF arms, with every frame in its own sim env so all frames solve in parallel (0.6–0.7 cm
-  mean error).
-- **AMP** ([`source/basketball/amp.py`](source/basketball/amp.py)): an LSGAN discriminator over (s, s′) arm-feature
-  transitions, trained inside the reward term so RSL-RL is unmodified. The first attempt saturated: the discriminator
-  scored every policy transition at −1 and the style reward went flat. It was fixed with a smaller discriminator,
-  input noise, a stronger gradient penalty, fewer updates, 100 Hz references, and a time-free nearest-frame
-  pose-matching term.
-
-### 4. Robustness (sim-to-real style)
-- Domain randomization of ball mass (567–650 g, the NBA spec), friction and restitution, link mass, motor gains,
-  joint friction, palm friction, 0–10 ms sub-step control latency
-  ([`DelayedJointPositionAction`](source/basketball/g1_mdp.py)), and sensor noise.
-- The **actor** sees the last 3 noisy observations, so it can infer latency and motor strength. The **critic** sees
-  the noise-free state plus the hidden randomization parameters ([`privileged_dynamics`](source/basketball/g1_mdp.py)),
-  i.e. an asymmetric actor-critic.
-
-### Reward hacking found and fixed
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| Policy dumps the ball immediately (4-step episodes) | Per-step posture penalties made ending the episode the cheapest option | Drop termination with a penalty; posture penalties switched on later by curriculum |
-| Pretty releases that never go in | Release-style bonus was easier to farm than making shots | Style bonus held until the shot is made |
-| Holds the ball until time-out | Per-step style rewards (AMP, pose match) pay for the holding pose too | Style rewards enabled only after the policy can shoot |
-| Gives up on long shots (pushes the ball 1 m) | Distance-based shaping is ~0 for every long miss | Ballistic aim reward at release, scaled with shot distance (work in progress) |
+Reward hacking found in this part: the policy dumped the ball when per-step posture penalties made ending the
+episode cheapest; farmed a release-style bonus without making shots; held the ball until time-out to collect style
+rewards; and gave up on long shots when distance shaping was ~0 for every long miss.
 
 ## Repository layout
 
 ```
 source/basketball/
-  g1_shoot_env_cfg.py   G1 tasks: base, form rewards, AMP, domain randomization, robust (history + asym. critic)
-  g1_mdp.py             actions (latency), observations, rewards, terminations, curriculum
-  amp.py                Adversarial Motion Prior + pose-match rewards
+  tracking_env_cfg.py   whole-body motion tracking task (floating-base G1)
+  tracking_mdp.py       motion command, grasp, push action, ball-flight reward, tracking rewards, terminations
+  shoot_track_env_cfg.py  whole-body shooting tasks (free throw, jump shot; push + residual variants)
+  g1_shoot_env_cfg.py, g1_mdp.py, amp.py   arm-only tasks (Part 2)
   mocap/cmu.py          ASF/AMC reader and forward kinematics
   assets/nba_hoop.usda  generated regulation hoop + court
-  shoot_env_cfg.py, mdp.py   early Franka-arm prototype
 scripts/
-  train.py / play.py    RSL-RL train / play (from Isaac Lab, registers these tasks)
-  eval_g1.py            hit rate per distance (--clean disables randomization)
-  showcase.py           record a fixed-distance shot video
-  retarget_cmu_to_g1.py, view_mocap.py, play_reference.py   mocap pipeline
-  feasibility_g1.py, hold_test_g1.py, debug_dr.py            physics checks and DR ablations
-  make_nba_hoop.py, make_demo.py
-data/mocap/             CMU subject 124 clips + retargeted G1 references (.npz)
-checkpoints/            g1_amp.pt (clean-sim best), g1_robust.pt (best under randomization)
+  retarget_cmu_wholebody.py, prepare_motion.py, play_wholebody_reference.py   whole-body mocap pipeline
+  cem_push.py           push search (CEM) on top of a tracking policy
+  record_shot.py        whole-body make-rate evaluation and video recording
+  debug_shoot_policy.py, survival_test.py, speed_test.py, check_ball_filter.py   diagnostics
+  train.py / play.py    RSL-RL train / play (from Isaac Lab)
+  retarget_cmu_to_g1.py, eval_g1.py, showcase.py, ...   arm-only pipeline (Part 2)
+data/mocap/             CMU subject 124 clips, retargeted references (arm-only and whole-body)
+data/motions/           tracking targets (*.npz) and searched pushes (push_*.npz)
+checkpoints/            g1_wholebody_free_throw.pt, g1_wholebody_jump_shot.pt, g1_amp.pt, g1_robust.pt
 ```
 
 | Task ID | What it trains |
 |---|---|
-| `Basketball-G1-ShootForm-v0` | PPO + form rewards + distance curriculum |
-| `Basketball-G1-ShootAMP-v0` | + Adversarial Motion Prior (use `checkpoints/g1_amp.pt`) |
-| `Basketball-G1-ShootDR-v0` | + domain randomization |
-| `Basketball-G1-ShootRobust-v0` | DR + observation history + asymmetric critic (use `checkpoints/g1_robust.pt`) |
+| `Basketball-G1-Track-v0` | whole-body motion tracking (no ball) |
+| `Basketball-G1-ShootPush-v0` | whole-body free throw: tracking + push + RL residual (`checkpoints/g1_wholebody_free_throw.pt`) |
+| `Basketball-G1-JumpShotPush-v0` | whole-body jump shot (`checkpoints/g1_wholebody_jump_shot.pt`) |
+| `Basketball-G1-ShootTrack-v0`, `Basketball-G1-JumpShot-v0` | tracking with ball, no push (release too slow to score) |
+| `Basketball-G1-ShootAMP-v0`, `Basketball-G1-ShootRobust-v0` | arm-only (Part 2) |
+
+Every task also has a `-Play-v0` variant.
 
 ## Setup
 
@@ -124,51 +177,65 @@ Tested on Windows 11, RTX 4080 16 GB, Isaac Sim 5.1 + Isaac Lab v2.3.2 (Python 3
 2. Known fixes on this setup:
    - `flatdict` build fails: `pip install "setuptools<81"` then `pip install flatdict==4.0.1 --no-build-isolation`.
    - `tensordict` must match torch 2.7: `pip install "tensordict>=0.8,<0.9"`.
-   - Rendering (GUI or `--video`) crashes in `rtx.scenedb.plugin` on NVIDIA drivers ≥ 595: add
-     `--kit_args="--/app/vulkan=false"` (DX12). GUI mode also needs `import h5py` before the app launches (done in
-     `scripts/play.py`).
+   - Rendering (GUI or video) crashes in `rtx.scenedb.plugin` on NVIDIA drivers ≥ 595: add
+     `--kit_args="--/app/vulkan=false"` (DX12). GUI mode also needs `import h5py` before the app launches.
 3. Run with `OMNI_KIT_ACCEPT_EULA=YES` once you have accepted the NVIDIA Omniverse license.
 
 ## Usage
 
 ```bash
-# watch the human-like policy in Isaac Sim (Windows)
-watch.bat
+# whole-body free throw: make rate over 256 envs, then a video
+python scripts/record_shot.py --headless --eval --task Basketball-G1-ShootPush-v0 --num_envs 256 --steps 600 --checkpoint checkpoints/g1_wholebody_free_throw.pt
+python scripts/record_shot.py --headless --task Basketball-G1-ShootPush-v0 --steps 1000 --checkpoint checkpoints/g1_wholebody_free_throw.pt --kit_args="--/app/vulkan=false"
 
-# train
-python scripts/train.py --task Basketball-G1-ShootForm-v0 --headless
+# whole-body jump shot
+python scripts/record_shot.py --headless --eval --task Basketball-G1-JumpShotPush-v0 --num_envs 256 --steps 600 --checkpoint checkpoints/g1_wholebody_jump_shot.pt
 
-# evaluate hit rate per distance (add --clean to turn off randomization)
+# whole-body pipeline from scratch
+python scripts/retarget_cmu_wholebody.py --headless --amc data/mocap/cmu_124/124_04.amc --start 3.4 --end 5.4 --ball_hold --out data/mocap/wholebody/g1_124_04_ball.npz
+python scripts/prepare_motion.py --headless --ref data/mocap/wholebody/g1_124_04_ball.npz --out data/motions/g1_124_04_ball.npz
+python scripts/train.py --task Basketball-G1-Track-v0 --headless
+python scripts/cem_push.py --headless --cost miss --leg_sigma 0.1 --upright_frames 45 --reg 1.5 --roll_sigma 0.2 --motion data/motions/g1_124_04_ball.npz --checkpoint <tracking-with-ball checkpoint> --out data/motions/push_ft.npz
+python scripts/train.py --task Basketball-G1-ShootPush-v0 --headless --resume --load_run <run> --checkpoint <model>
+
+# arm-only (Part 2)
 python scripts/eval_g1.py --headless --task Basketball-G1-ShootRobust-v0 --checkpoint checkpoints/g1_robust.pt --distances 2.0 4.19 6.75
-
-# record a 3-pointer from the side
-python scripts/showcase.py --headless --task Basketball-G1-ShootAMP-Play-v0 --checkpoint checkpoints/g1_amp.pt --distance 6.75 --side --kit_args="--/app/vulkan=false"
-
-# mocap pipeline
-python scripts/retarget_cmu_to_g1.py --headless --amc data/mocap/cmu_124/124_04.amc --start 3.7 --end 5.2 --fps 100 --out data/mocap/g1_124_04_100hz.npz
-python scripts/play_reference.py --headless --ref data/mocap/g1_124_04_100hz.npz --kit_args="--/app/vulkan=false"
 ```
 
 ## Limitations
 
-- **Simulation only**: no real-robot deployment. The pelvis is fixed (no legs or balance), and the policy gets the
-  hoop position as a state input rather than from a camera.
-- **Range under randomization**: the robust policy trained from scratch stalled at 5.25 m and scores 0% from the
-  3-point line under full randomization, while a policy first trained in clean sim and then fine-tuned with DR keeps
-  18%. A distance-scaled ballistic aim reward is in progress; training clean-first-then-DR with the robust
-  architecture is the next thing to try.
-- The shot is a right-hand-dominant two-hand shot, not yet a strict one-hand shot with a passive guide hand
-  (references with a frozen guide arm are already generated: `retarget_cmu_to_g1.py --one_hand`).
+- **Simulation only:** no real-robot deployment. The policy gets the ball and hoop positions as state, not from a
+  camera.
+- **Grasp abstraction:** before the release the ball is held rigidly at the palm center and ball–robot contacts are
+  filtered. The Dex3 fingers do not grip the ball.
+- **The push is not from mocap:** human motion is tracked up to the set point, but the fast push phase comes from
+  the CEM search plus RL. The free throw reads as a two-hand overhead push, not a one-hand NBA release with a
+  guide hand.
+- **One distance per task** (free-throw line, a fixed jump-shot spot), no shot-distance curriculum yet.
+- **Fragility:** the make rate is sensitive to tiny state differences; observation noise is kept at 30% of the
+  tracking level.
 
-**Next:** strict one-hand form, whole-body jump shot (floating base + balance), head-camera perception.
+## Related work
+
+- **SkillMimic** (Wang et al., CVPR 2025) and **SkillMimic-V2** (SIGGRAPH 2025) learn basketball skills (shooting,
+  layups, dribbling) for physics-based humanoids from human–ball interaction data. The ball-flight tracking reward
+  here follows the same idea of tracking the object, with a synthesized ball trajectory because the CMU mocap has no
+  ball.
+- **HumanX** (2026) learns interaction skills including a fadeaway jump shot from human videos and runs them on a
+  real Unitree G1.
+- **BeyondMimic** (2025): the whole-body tracking formulation used in step 2.
+- Whole-body throwing with legged robots (2024) and accurate whole-body throwing with a residual policy (2025): the
+  push + residual structure here is close to the latter.
+- X. B. Peng et al., *AMP: Adversarial Motion Priors*, SIGGRAPH 2021 (Part 2).
+- L. Liu and J. Hodgins, *Learning Basketball Dribbling Skills Using Trajectory Optimization and Deep RL*,
+  SIGGRAPH 2018.
 
 ## Acknowledgements
 
 - Motion capture: the data used in this project was obtained from [mocap.cs.cmu.edu](http://mocap.cs.cmu.edu).
   The database was created with funding from NSF EIA-0196217.
 - [NVIDIA Isaac Lab](https://github.com/isaac-sim/IsaacLab) (BSD-3-Clause); `scripts/train.py`, `play.py`, and
-  `cli_args.py` are adapted from it. Unitree G1 + Inspire hand assets are loaded from Isaac Lab's asset server.
-- X. B. Peng et al., *AMP: Adversarial Motion Priors for Stylized Physics-Based Character Control*, SIGGRAPH 2021.
+  `cli_args.py` are adapted from it. Unitree G1 assets are loaded from Isaac Lab's asset server.
 
 ## License
 
